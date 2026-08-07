@@ -196,9 +196,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
+        # The "full pipeline" button posts its own flag rather than a second
+        # field named "stage", which would collide with the dropdown.
+        stage = "all" if form.get("full") else form.get("stage", ["story"])[0]
         error = _start(
             form.get("case_id", [""])[0].strip(),
-            form.get("stage", ["story"])[0],
+            stage,
             form.get("topic", [""])[0],
             form.get("fast", [""])[0] == "on",
             form.get("max_parts", [""])[0],
@@ -249,12 +252,16 @@ class Handler(BaseHTTPRequestHandler):
   <input name="topic" placeholder="topic (first run only)" style="width:200px">
   <input name="max_parts" placeholder="max parts" style="width:90px">
   <label class="muted"><input type="checkbox" name="fast"> fast images (SD 1.5)</label>
-  <button class="btn needs-idle" type="submit">Run</button>
+  <button class="btn needs-idle" type="submit">Run stage</button>
+  <button class="btn needs-idle" type="submit" name="full" value="1"
+          style="background:#1f6feb">Run full pipeline</button>
   <a class="btn sec" href="/stop" style="text-decoration:none">Stop</a>
 </form>
-<p class="muted" style="margin-bottom:0">Stages run in order: story &rarr; script &rarr; archive
-&rarr; voiceover &rarr; video &rarr; metadata &rarr; publish. Topic matters only on the first
-<code>story</code> run — without it a random case is researched.</p></div>
+<p class="muted" style="margin-bottom:0"><b>Run full pipeline</b> goes story &rarr; script &rarr;
+archive &rarr; voiceover &rarr; video &rarr; metadata &rarr; publish in one go, ignoring the
+stage dropdown. Publishing stays a dry run unless <code>PUBLISH_DRY_RUN=false</code> is set.
+Topic matters only on the first <code>story</code> run — without it a random case is
+researched. Expect a few hours on SDXL, well under one with fast images.</p></div>
 
 <div class="card"><div id="state">{self._state_line()}</div>
 <p class="muted">Cost — this case: ${case_cost:.2f} &middot; all cases: ${total_cost:.2f}</p>
