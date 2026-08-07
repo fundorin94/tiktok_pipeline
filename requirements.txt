@@ -1,0 +1,5 @@
+anthropic>=0.75.0
+python-dotenv>=1.0.0
+piper-tts>=1.2.0
+ffmpeg-python>=0.2.0
+requests>=2.31.0

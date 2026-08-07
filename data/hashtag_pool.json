@@ -1,0 +1,33 @@
+{
+  "_comment": "Hashtag pool for TikTok captions. 'evergreen' tags are stable true-crime tags that stay relevant for months. 'trending' is refreshed by hand from TikTok Creative Center (Trends -> Hashtags, filter by your region and the Entertainment/News category) using tools/update_trending_hashtags.py -- TikTok exposes no API for this. 'series' identifies this channel's own content so a viewer can find the other parts.",
+  "evergreen": [
+    "truecrime",
+    "truecrimetok",
+    "truecrimetiktok",
+    "truecrimecommunity",
+    "crimetok",
+    "coldcase",
+    "criminalcase",
+    "documentary",
+    "unsolvedmysteries",
+    "casefiles"
+  ],
+  "series": [
+    "truecrimeseries",
+    "parttwo"
+  ],
+  "trending": [
+    "truecrimestory",
+    "casefile",
+    "unsolved2026"
+  ],
+  "trending_updated": "2026-08-01T16:52:30+00:00",
+  "banned": [
+    "murder",
+    "killer",
+    "death",
+    "gore",
+    "crimescene"
+  ],
+  "_banned_comment": "Tags that describe violence directly. TikTok's guidelines restrict violent content, and tags like these are the ones most often suppressed -- keep the topic in the words, not in the tags."
+}

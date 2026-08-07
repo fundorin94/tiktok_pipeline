@@ -1,0 +1,20 @@
+# Secrets -- never commit
+.env
+data/tiktok_token.json
+
+# Local state: per-run output, caches, database
+data/pipeline.db
+data/cases/
+data/media_cache/
+data/safety_cache.json
+night_run.log
+
+# Large binaries: model weights, voices, screen recordings
+models/
+data/voices/
+recording/
+
+# Python
+venv/
+__pycache__/
+*.pyc
