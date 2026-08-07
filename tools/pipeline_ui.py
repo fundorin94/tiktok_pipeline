@@ -116,6 +116,17 @@ def _pump(proc) -> None:
             _run["log"].append(line)
 
 
+def _topics() -> dict:
+    """Topic stored per case. Shown in the table because it decides what the
+    research stage looks up, and it isn't visible anywhere else."""
+    try:
+        db = Database(DB_PATH)
+        with db._connect() as conn:
+            return {r["id"]: (r["topic"] or "") for r in conn.execute("SELECT id, topic FROM cases")}
+    except Exception:
+        return {}
+
+
 def _costs() -> tuple:
     try:
         db = Database(DB_PATH)
@@ -225,19 +236,22 @@ class Handler(BaseHTTPRequestHandler):
         opts = "".join(f'<option value="{html.escape(c)}">{html.escape(c)}</option>' for c in cases)
         stage_opts = "".join(f'<option value="{s}">{s}</option>' for s in STAGES)
 
+        topics = _topics()
         rows = ""
         for c in cases:
             st = _case_state(c)
             def mark(ok): return "yes" if ok else "&mdash;"
+            topic = topics.get(c) or '<span style="color:#b3261e">not set</span>'
             rows += (
-                f"<tr><td><b>{html.escape(c)}</b></td><td>{mark(st['brief'])}</td>"
-                f"<td>{mark(st['script'])}</td>"
+                f"<tr><td><b>{html.escape(c)}</b></td>"
+                f"<td>{html.escape(topic) if topics.get(c) else topic}</td>"
+                f"<td>{mark(st['brief'])}</td><td>{mark(st['script'])}</td>"
                 f"<td>{st['real_photos']} real / {st['ai_frames']} ai</td>"
                 f"<td>{mark(st['audio'])}</td><td>{st['videos']}</td>"
                 f"<td>{mark(st['metadata'])}</td></tr>"
             )
         table = (
-            "<table><tr><th>case</th><th>brief</th><th>script</th><th>frames</th>"
+            "<table><tr><th>case</th><th>topic</th><th>brief</th><th>script</th><th>frames</th>"
             f"<th>audio</th><th>videos</th><th>meta</th></tr>{rows}</table>"
             if rows else '<p class="muted">No cases yet — enter a new id and topic below.</p>'
         )

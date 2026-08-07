@@ -60,6 +60,12 @@ class Database:
                 "INSERT OR IGNORE INTO cases (id, topic, status, created_at) VALUES (?, ?, 'new', ?)",
                 (case_id, topic, _now()),
             )
+            # An explicitly given topic must win. INSERT OR IGNORE keeps the
+            # stored one, so re-running an existing case with a new topic
+            # silently researched the old subject -- once producing an
+            # entirely different killer's case than the one asked for.
+            if topic:
+                conn.execute("UPDATE cases SET topic = ? WHERE id = ?", (topic, case_id))
 
     def get_case(self, case_id: str) -> sqlite3.Row | None:
         with self._connect() as conn:
