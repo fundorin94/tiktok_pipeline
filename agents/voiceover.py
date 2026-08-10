@@ -1,11 +1,16 @@
 import json
+import os
+import shutil
+import subprocess
 import tempfile
 import wave
 from pathlib import Path
 
-from config import CASES_DIR, VOICE_CONFIG_PATH, VOICE_MODEL_PATH
+from config import (CASES_DIR, QWEN_TTS_INSTRUCT, QWEN_TTS_MODEL, QWEN_TTS_SPEAKER,
+                    VOICE_CONFIG_PATH, VOICE_ENGINE, VOICE_MODEL_PATH, VOICE_TEMPO)
 
 _VOICE = None
+_QWEN = None
 
 
 def _case_dir(case_id: str) -> Path:
@@ -69,10 +74,58 @@ def _get_voice():
     return _VOICE
 
 
+def _get_qwen():
+    global _QWEN
+    if _QWEN is None:
+        import torch
+        from qwen_tts import Qwen3TTSModel
+
+        print(f"  loading {QWEN_TTS_MODEL} (first run downloads ~3.5GB) ...", flush=True)
+        _QWEN = Qwen3TTSModel.from_pretrained(
+            QWEN_TTS_MODEL, device_map="cuda:0", dtype=torch.bfloat16)
+    return _QWEN
+
+
+def _apply_tempo(path: Path) -> None:
+    """Adjust pace without shifting pitch. ffmpeg cannot open this project's
+    Cyrillic path on this machine, so the filtering happens on ASCII copies
+    in the temp directory."""
+    if abs(VOICE_TEMPO - 1.0) < 0.01:
+        return
+    tmp_dir = Path(tempfile.gettempdir())
+    src = tmp_dir / f"tts_src_{os.getpid()}.wav"
+    out = tmp_dir / f"tts_out_{os.getpid()}.wav"
+    try:
+        shutil.copy2(path, src)
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
+             "-filter:a", f"atempo={VOICE_TEMPO}", str(out)],
+            check=True, capture_output=True,
+        )
+        shutil.copy2(out, path)
+    finally:
+        src.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
+
+
 def _synthesize(text: str, dest_path: Path) -> float:
-    voice = _get_voice()
-    with wave.open(str(dest_path), "wb") as wav_file:
-        voice.synthesize_wav(text, wav_file)
+    if VOICE_ENGINE == "qwen":
+        import soundfile as sf
+
+        wavs, sample_rate = _get_qwen().generate_custom_voice(
+            text=text, language="English",
+            speaker=QWEN_TTS_SPEAKER, instruct=QWEN_TTS_INSTRUCT,
+        )
+        sf.write(dest_path, wavs[0], sample_rate)
+        # Tempo is applied before the duration is read: the video stage times
+        # every cut against these numbers, so they must describe the audio as
+        # it will actually play.
+        _apply_tempo(dest_path)
+    else:
+        voice = _get_voice()
+        with wave.open(str(dest_path), "wb") as wav_file:
+            voice.synthesize_wav(text, wav_file)
+
     with wave.open(str(dest_path), "rb") as wav_file:
         frames = wav_file.getnframes()
         rate = wav_file.getframerate()
