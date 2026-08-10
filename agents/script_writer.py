@@ -304,6 +304,21 @@ def _scene_sentence_count(text: str) -> int:
     return len([s for s in re.split(r"(?<=[.!?])\s+", (text or "").strip()) if s])
 
 
+# Subjects the prompt forbids but the model still asks for now and then --
+# a query for "blood on white pillowcases" got through with the rule sitting
+# right there in the instructions. The image gate caught the frame, but a
+# query that can only produce something unusable wastes a generation slot
+# and would have shipped had the gate blinked.
+_FORBIDDEN_SUBJECTS = re.compile(
+    r"\b(blood|bloody|bloodstain\w*|corpse|dead body|body bag|remains|skeletal|"
+    r"autopsy|wound\w*|injur\w*|gore|strangl\w*|stab\w*|nude|naked)\b", re.I)
+
+
+def _forbidden_query(scene: dict):
+    """Queries asking for something the content rules exclude outright."""
+    return [q for q in (scene.get("visual_queries") or []) if _FORBIDDEN_SUBJECTS.search(q)]
+
+
 def _missing_person_query(scene: dict, known_names: list) -> bool:
     """True when the narration names a known person (victim, perpetrator,
     witness) but no visual query asks for that person -- every named person
@@ -462,9 +477,13 @@ def _repair_scenes_once(client, db, case_id: str, script: dict, known_names: lis
             repeats = overused and any(
                 any(w.strip(",.").lower() in overused for w in q.split())
                 for q in (scene.get("visual_queries") or []))
+            banned = _forbidden_query(scene)
+            if banned:
+                print(f"  rejected forbidden visual(s): {'; '.join(q[:44] for q in banned)}")
             if (_scene_is_undercovered(scene) or _missing_person_query(scene, known_names)
-                    or repeats):
-                bad.append((part, scene, sorted(overused) if repeats else []))
+                    or repeats or banned):
+                avoid = sorted(overused) if repeats else []
+                bad.append((part, scene, avoid))
     if not bad:
         return 0
 
