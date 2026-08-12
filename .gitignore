@@ -18,3 +18,4 @@ recording/
 venv/
 __pycache__/
 *.pyc
+docs/site/
