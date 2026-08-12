@@ -123,6 +123,34 @@ def _stage_input(src_path: str, work_dir: Path, tag: str) -> str:
     return str(dest)
 
 
+def _load_clips(case_id: str) -> dict:
+    """Frames that have an animated version, written by tools/animate_frames.
+    Absent for most cases -- generating motion costs about six minutes of
+    compute per second of footage, so only a few shots per part get it."""
+    path = _case_dir(case_id) / "clips_manifest.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _build_clip_subclip(local_clip: str, duration: float, work_dir: Path, tag: str) -> Path:
+    """A shot cut from an animated clip. The clip is short, so it loops to
+    fill its slot; no Ken Burns move is applied because the footage already
+    moves, and stacking a pan on top reads as seasickness."""
+    out_path = work_dir / f"{tag}.mp4"
+    vf = (f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+          f"crop={WIDTH}:{HEIGHT},fps={FPS}")
+    args = [
+        "-stream_loop", "-1", "-i", local_clip,
+        "-vf", vf, "-an",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(FPS),
+        "-t", str(duration),
+        str(out_path),
+    ]
+    _run_ffmpeg(args)
+    return out_path
+
+
 def _build_visual_subclip(local_image: str, duration: float, work_dir: Path, tag: str, preset_index: int) -> Path:
     """One silent Ken Burns clip from a single image, for a ~3s sub-window
     of a scene. preset_index picks the pan/zoom direction so consecutive
@@ -301,7 +329,7 @@ def _borrow_frame(groups: list, g_idx: int, exclude: str, nth: int, kinds: list 
 
 
 def _build_scene_visual_track(image_paths: list, duration: float, work_dir: Path, tag: str,
-                              sync: tuple | None = None) -> Path:
+                              sync: tuple | None = None, clips: dict | None = None) -> Path:
     """Cut the scene's duration into ~3s sub-clips, cycling through the
     available image(s) (and Ken Burns presets) so the visual changes every
     few seconds instead of holding one static frame for the whole scene.
@@ -316,6 +344,7 @@ def _build_scene_visual_track(image_paths: list, duration: float, work_dir: Path
     _build_visual_subclip), consecutive sub-clips of the same photo look
     like distinct shots rather than an obvious repeat."""
     first_preset_index = hash(tag) % len(KEN_BURNS_PRESETS)
+    clips = clips or {}
 
     # NARRATION SYNC: when the scene has resolvable visual_anchors, each
     # query's images are shown during that query's own narration window
@@ -336,7 +365,11 @@ def _build_scene_visual_track(image_paths: list, duration: float, work_dir: Path
                 k = max(1, round(w_dur / SUBCLIP_SECONDS))
                 for j in range(k):
                     pick = group[j % len(group)]
-                    if pick == previous:
+                    # An animated shot may hold consecutive slots: it is moving
+                    # footage, so repeating it reads as one continuous take
+                    # rather than a frozen image, and a three-second clip in a
+                    # two-minute part is otherwise too brief to notice.
+                    if pick == previous and not clips.get(pick):
                         alt = _borrow_frame(groups, g_idx, exclude=previous, nth=j, kinds=kinds)
                         if alt:
                             pick = alt
@@ -351,6 +384,11 @@ def _build_scene_visual_track(image_paths: list, duration: float, work_dir: Path
 
     subclips = []
     for i, (src, sub_duration) in enumerate(plan):
+        animated = clips.get(src)
+        if animated and Path(animated).is_file():
+            local = _stage_input(animated, work_dir, f"{tag}_sub{i}_src")
+            subclips.append(_build_clip_subclip(local, sub_duration, work_dir, f"{tag}_sub{i}"))
+            continue
         local_image = _stage_input(src, work_dir, f"{tag}_sub{i}_src")
         subclips.append(_build_visual_subclip(local_image, sub_duration, work_dir, f"{tag}_sub{i}", first_preset_index + i))
 
@@ -385,6 +423,7 @@ def _build_scene_segment(
     anchors: list | None = None,
     n_queries: int = 0,
     query_meta: list | None = None,
+    clips: dict | None = None,
 ) -> Path:
     # lead_in prepends a short silence so the narration's first word isn't
     # clipped by AAC encoder priming at the very start of each part.
@@ -398,7 +437,7 @@ def _build_scene_segment(
     kinds = [m.get("kind", "") for m in (query_meta or [])] or None
     sync = ((scene_text, anchors, n_queries, lead_in, kinds or [""] * n_queries)
             if (anchors and n_queries) else None)
-    visual_track = _build_scene_visual_track(image_paths, total_duration, work_dir, f"{tag}_visual", sync) if image_paths else None
+    visual_track = _build_scene_visual_track(image_paths, total_duration, work_dir, f"{tag}_visual", sync, clips) if image_paths else None
 
     out_path = work_dir / f"{tag}.mp4"
 
@@ -509,6 +548,9 @@ def run(case_id: str, db) -> None:
 
     work_dir = _ascii_work_dir(case_id)
     video_dir = _video_dir(case_id)
+    clips = _load_clips(case_id)
+    if clips:
+        print(f"  {len(clips)} animated clip(s) available -- those shots will move")
 
     placeholder_count = 0
     total_scene_count = 0
@@ -553,7 +595,7 @@ def run(case_id: str, db) -> None:
                 seg_path = _build_scene_segment(
                     scene["text"], audio_item["duration_seconds"], audio_item["audio_path"],
                     image_paths, work_dir, tag, title_overlay, lead_in,
-                    anchors, n_queries, query_meta,
+                    anchors, n_queries, query_meta, clips,
                 )
             except RuntimeError as exc:
                 # A bad/oversized source image shouldn't take down the whole

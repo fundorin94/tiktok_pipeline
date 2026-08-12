@@ -6,8 +6,10 @@ import tempfile
 import wave
 from pathlib import Path
 
-from config import (CASES_DIR, QWEN_TTS_INSTRUCT, QWEN_TTS_MODEL, QWEN_TTS_SPEAKER,
-                    VOICE_CONFIG_PATH, VOICE_ENGINE, VOICE_MODEL_PATH, VOICE_TEMPO)
+from config import (CASES_DIR, QWEN_TTS_CLONE_MODEL, QWEN_TTS_INSTRUCT, QWEN_TTS_MODE,
+                    QWEN_TTS_MODEL, QWEN_TTS_REF_AUDIO, QWEN_TTS_REF_TEXT, QWEN_TTS_SEED,
+                    QWEN_TTS_SPEAKER, QWEN_TTS_TEMPERATURE, VOICE_CONFIG_PATH,
+                    VOICE_ENGINE, VOICE_MODEL_PATH, VOICE_TEMPO)
 
 _VOICE = None
 _QWEN = None
@@ -80,9 +82,10 @@ def _get_qwen():
         import torch
         from qwen_tts import Qwen3TTSModel
 
-        print(f"  loading {QWEN_TTS_MODEL} (first run downloads ~3.5GB) ...", flush=True)
+        model_id = QWEN_TTS_CLONE_MODEL if QWEN_TTS_MODE == "clone" else QWEN_TTS_MODEL
+        print(f"  loading {model_id} (first run downloads ~3.5GB) ...", flush=True)
         _QWEN = Qwen3TTSModel.from_pretrained(
-            QWEN_TTS_MODEL, device_map="cuda:0", dtype=torch.bfloat16)
+            model_id, device_map="cuda:0", dtype=torch.bfloat16)
     return _QWEN
 
 
@@ -112,10 +115,27 @@ def _synthesize(text: str, dest_path: Path) -> float:
     if VOICE_ENGINE == "qwen":
         import soundfile as sf
 
-        wavs, sample_rate = _get_qwen().generate_custom_voice(
-            text=text, language="English",
-            speaker=QWEN_TTS_SPEAKER, instruct=QWEN_TTS_INSTRUCT,
-        )
+        import torch
+
+        # Same seed and a low temperature for every scene: each one is its own
+        # generation, and at default sampling the reading drifted between them.
+        torch.manual_seed(QWEN_TTS_SEED)
+        if QWEN_TTS_MODE == "clone":
+            if not QWEN_TTS_REF_AUDIO.exists():
+                raise RuntimeError(
+                    f"reference narration not found at {QWEN_TTS_REF_AUDIO} -- "
+                    "pick a take with tools/voice_audition.py and copy it there")
+            wavs, sample_rate = _get_qwen().generate_voice_clone(
+                text=text, language="English",
+                ref_audio=str(QWEN_TTS_REF_AUDIO), ref_text=QWEN_TTS_REF_TEXT,
+                temperature=QWEN_TTS_TEMPERATURE,
+            )
+        else:
+            wavs, sample_rate = _get_qwen().generate_custom_voice(
+                text=text, language="English",
+                speaker=QWEN_TTS_SPEAKER, instruct=QWEN_TTS_INSTRUCT,
+                temperature=QWEN_TTS_TEMPERATURE,
+            )
         sf.write(dest_path, wavs[0], sample_rate)
         # Tempo is applied before the duration is read: the video stage times
         # every cut against these numbers, so they must describe the audio as

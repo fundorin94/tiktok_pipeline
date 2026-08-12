@@ -56,6 +56,27 @@ QWEN_TTS_INSTRUCT = os.environ.get(
 # the readings came back longer. Tempo is set afterwards instead, which is
 # exact and leaves pitch untouched.
 VOICE_TEMPO = float(os.environ.get("VOICE_TEMPO", "1.12"))
+# Each scene is a separate generation, and at the model's default sampling
+# temperature the delivery drifted noticeably between them -- one scene
+# breathy, the next clipped. A low temperature and a fixed seed keep one
+# reading across a whole episode.
+QWEN_TTS_TEMPERATURE = float(os.environ.get("QWEN_TTS_TEMPERATURE", "0.5"))
+QWEN_TTS_SEED = int(os.environ.get("QWEN_TTS_SEED", "20260811"))
+
+# Fixing the seed was not enough: it pins the random stream, but the text
+# differs from scene to scene, so the model kept re-interpreting the style
+# brief and the delivery drifted across an episode. Conditioning every scene
+# on one reference recording anchors the timbre AND the manner, which is
+# what "the same narrator" actually means.
+QWEN_TTS_MODE = os.environ.get("QWEN_TTS_MODE", "clone").lower()  # "clone" | "custom"
+QWEN_TTS_CLONE_MODEL = os.environ.get("QWEN_TTS_CLONE_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
+QWEN_TTS_REF_AUDIO = DATA_DIR / "voices" / "reference_narrator.wav"
+QWEN_TTS_REF_TEXT = (
+    "On August 16, 1975, a highway patrol officer stopped a tan Volkswagen Beetle "
+    "in Granger, Utah. When he looked inside, he saw something odd. The front "
+    "passenger seat was missing. In the back he found a ski mask, handcuffs, "
+    "and a crowbar."
+)
 
 VOICES_DIR = DATA_DIR / "voices"
 VOICE_MODEL_PATH = VOICES_DIR / "en_US-hfc_male-medium.onnx"
