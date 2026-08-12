@@ -55,7 +55,7 @@ QWEN_TTS_INSTRUCT = os.environ.get(
 # Asking the model to speak faster makes it more expressive, not quicker --
 # the readings came back longer. Tempo is set afterwards instead, which is
 # exact and leaves pitch untouched.
-VOICE_TEMPO = float(os.environ.get("VOICE_TEMPO", "1.12"))
+VOICE_TEMPO = float(os.environ.get("VOICE_TEMPO", "1.0"))
 # Each scene is a separate generation, and at the model's default sampling
 # temperature the delivery drifted noticeably between them -- one scene
 # breathy, the next clipped. A low temperature and a fixed seed keep one

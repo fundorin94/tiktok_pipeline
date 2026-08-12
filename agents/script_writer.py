@@ -21,7 +21,7 @@ pornography, a rehearsed fake injury, charm used as a weapon, a double life), sp
 sentences unpacking it: what exactly he did, how it escalated, what it looked like from the \
 outside, what those around him missed. Prefer one vividly developed thread over three facts \
 mentioned in passing -- but never invent details not supported by the brief.
-- HARD CONSTRAINT: each part must be 280-420 words of narration (about 2-3 minutes spoken \
+- HARD CONSTRAINT: each part must be 400-550 words of narration (about 2-3 minutes spoken \
 aloud).
 - HARD CAP: the whole script must have AT MOST 6 parts. Never exceed 6, no matter how much \
 material the brief contains. Aim for 5-6 parts for a well-documented case; use fewer only if \
@@ -36,11 +36,11 @@ skipping the word-count target.
 question that makes the viewer want the next part -- an actual narrative beat (a discovery \
 about to be made, a suspect about to be confronted), not a cheap "but that's not all" filler \
 line.
-- The 280-420 words/part and AT MOST 6 parts caps above are absolute and do not bend for \
+- The 400-550 words/part and AT MOST 6 parts caps above are absolute and do not bend for \
   anything below -- not for splitting scenes more finely, not for including more violent detail, \
   not for covering more victims individually, not for anything else. Splitting into more/shorter \
   scenes must happen INSIDE the same word budget, not by writing more words. If following the \
-  scene-granularity or content guidance below would push a part past 420 words or the script past \
+  scene-granularity or content guidance below would push a part past 550 words or the script past \
   6 parts, cut material (fewer timeline entries, less granular coverage of minor figures) rather \
   than exceed either cap. A script that blows through these caps is a failed script regardless of \
   how well it follows every other instruction.
@@ -619,5 +619,5 @@ def run(case_id: str, db) -> None:
     cap_note = "" if len(parts) <= 6 else "  <- EXCEEDS 6-part cap, review prompt/output"
     print(f"  parts: {len(parts)}{cap_note}")
     for p in parts:
-        note = "" if 260 <= p["word_count"] <= 440 else "  <- outside 2-3min target, review"
+        note = "" if 380 <= p["word_count"] <= 570 else "  <- outside 2-3min target, review"
         print(f"    part {p['part_number']}: {p['word_count']} words (~{p['est_seconds']}s){note}")
