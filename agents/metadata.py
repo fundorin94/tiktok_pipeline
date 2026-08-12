@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from config import ANTHROPIC_API_KEY, CASES_DIR, DATA_DIR, METADATA_MODEL
 HASHTAG_POOL_PATH = DATA_DIR / "hashtag_pool.json"
 TRENDING_STALE_DAYS = 14
 MAX_HASHTAGS = 10
+TITLE_MAX_CHARS = 60
 
 SYSTEM_PROMPT = """You are a social media metadata writer for a true-crime short-form video \
 series distributed as TikTok "Part 1, Part 2, ..." episodes. You receive the full multi-part \
@@ -106,6 +108,94 @@ def _compose_hashtags(model_tags: list, pool: dict, use_trending: bool) -> list:
     return ordered[:MAX_HASHTAGS]
 
 
+TITLE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "titles": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "part_number": {"type": "integer"},
+                    "title": {"type": "string"},
+                },
+                "required": ["part_number", "title"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["titles"],
+    "additionalProperties": False,
+}
+
+
+def _title_problems(title: str, part_number: int) -> list:
+    """What's wrong with a title, phrased so the model can act on it."""
+    problems = []
+    if len(title) > TITLE_MAX_CHARS:
+        problems.append(f"it is {len(title)} characters, over the {TITLE_MAX_CHARS}-character limit")
+    if len(re.findall(rf"part\s*{part_number}\b", title, re.IGNORECASE)) > 1:
+        problems.append(f'it says "Part {part_number}" more than once')
+    return problems
+
+
+def _repair_titles(client, db, case_id: str, script: dict, parts: list) -> None:
+    """The title is the first thing a viewer reads, and the model drifts past
+    the length limit often enough that shipping it unchecked is a coin flip --
+    one run came back with three overlong titles and a "Part 6 | ... Part 6".
+    Re-ask for only the bad ones: the rest of the response was fine, and a
+    whole-stage re-roll would just be a fresh throw of the same dice."""
+    bad = [(p, _title_problems(p["title"], p["part_number"])) for p in parts]
+    bad = [(p, why) for p, why in bad if why]
+    if not bad:
+        return
+
+    hooks = {p["part_number"]: p.get("hook", "") for p in script["parts"]}
+    listing = "\n".join(
+        f'- Part {p["part_number"]}: {p["title"]!r}\n'
+        f'  problem: {"; ".join(why)}\n'
+        f'  this part is about: {hooks.get(p["part_number"], "")}'
+        for p, why in bad
+    )
+    print(f"  rewriting {len(bad)} title(s) that broke the rules", flush=True)
+
+    response = client.messages.create(
+        model=METADATA_MODEL,
+        max_tokens=2000,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content":
+                   "These titles you wrote break the title rules. Rewrite each one, keeping the "
+                   "same specific detail and the same meaning, and fix the stated problem. "
+                   f'"Part N" must appear exactly once, at the end.\n\n{listing}'}],
+        output_config={"format": {"type": "json_schema", "schema": TITLE_SCHEMA}},
+    )
+    db.log_usage(case_id, "metadata_titles", METADATA_MODEL,
+                 response.usage.input_tokens, response.usage.output_tokens)
+    if response.stop_reason == "refusal":
+        raise RuntimeError("Model refused the title rewrite request")
+
+    text_blocks = [b.text for b in response.content if b.type == "text"]
+    if not text_blocks:
+        raise RuntimeError("Model returned no text content for the title rewrite")
+
+    rewritten = {t["part_number"]: t["title"] for t in json.loads(text_blocks[0])["titles"]}
+    by_number = {p["part_number"]: p for p in parts}
+    for number, title in rewritten.items():
+        part = by_number.get(number)
+        if part is None:
+            continue
+        # Only take the rewrite if it actually fixed things -- a worse second
+        # attempt shouldn't overwrite the first.
+        if not _title_problems(title, number):
+            part["title"] = title
+
+    # One rewrite round only. A title that's still long is worth shipping with
+    # a warning; failing the stage here would throw away good metadata.
+    for part in parts:
+        for problem in _title_problems(part["title"], part["part_number"]):
+            print(f"  warning: part {part['part_number']} title still off -- {problem}")
+
+
 def _load_script(case_id: str) -> dict:
     path = _case_dir(case_id) / "script.json"
     if not path.exists():
@@ -146,6 +236,8 @@ def run(case_id: str, db) -> None:
         raise RuntimeError("Model returned no text content")
 
     metadata = json.loads(text_blocks[0])
+
+    _repair_titles(client, db, case_id, script, metadata["parts"])
 
     age = _trending_age_days(pool)
     use_trending = bool(pool.get("trending")) and age is not None and age <= TRENDING_STALE_DAYS
