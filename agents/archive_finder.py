@@ -937,7 +937,16 @@ def run(case_id: str, db) -> None:
                                    fallback_query=fallbacks[q_index] if q_index < len(fallbacks) else "",
                                    era=case_era)
                 item["queries"].append({k: r[k] for k in ("query", "kind", "status", "note")})
-                item["local_paths"].extend(r["frames"])
+                # Only record frames that are actually on disk. A rejected
+                # re-roll unlinks its file, and when that file's path was
+                # already collected the manifest ends up pointing at nothing --
+                # which the video stage then hits hours later, at the end of
+                # the run, with no way to recover the frame.
+                for frame in r["frames"]:
+                    if Path(frame).is_file():
+                        item["local_paths"].append(frame)
+                    else:
+                        print(f"    dropped a frame that is no longer on disk: {Path(frame).name}", flush=True)
                 item["review_frames"].extend(r["review_frames"])
                 if r["status"] == "manual_person":
                     item["manual_people"].append(query)

@@ -570,6 +570,17 @@ def run(case_id: str, db) -> None:
                 raise RuntimeError(f"missing audio for part {part_number} scene {scene_index}")
 
             item_paths = media_item.get("local_paths") if media_item else None
+            if item_paths:
+                # A manifest entry can outlive its file: the archive stage
+                # records a frame that a later re-roll then deletes. Drop those
+                # here rather than letting the copy into the work dir raise --
+                # a scene keeps whatever frames survived, and only a scene that
+                # lost all of them borrows the previous one.
+                on_disk = [p for p in item_paths if Path(p).is_file()]
+                if len(on_disk) != len(item_paths):
+                    print(f"  warning: part {part_number} scene {scene_index}: "
+                          f"{len(item_paths) - len(on_disk)} frame(s) in the manifest are missing from disk")
+                item_paths = on_disk
             has_visual = media_item and media_item.get("status") in APPROVED_STATUSES and item_paths
             if has_visual:
                 image_paths = item_paths
@@ -597,9 +608,12 @@ def run(case_id: str, db) -> None:
                     image_paths, work_dir, tag, title_overlay, lead_in,
                     anchors, n_queries, query_meta, clips,
                 )
-            except RuntimeError as exc:
-                # A bad/oversized source image shouldn't take down the whole
-                # run -- fall back to a blank card for just this scene.
+            except (RuntimeError, OSError) as exc:
+                # A bad/oversized/unreadable source image shouldn't take down
+                # the whole run -- fall back to a blank card for just this
+                # scene. OSError is in here because a missing or locked file
+                # raises that, not RuntimeError, and escaping this handler
+                # costs the entire run at its very last stage.
                 print(f"  warning: part {part_number} scene {scene_index} visual failed ({exc}); using placeholder")
                 seg_path = _build_scene_segment(
                     scene["text"], audio_item["duration_seconds"], audio_item["audio_path"],
