@@ -1,6 +1,7 @@
 @echo off
 rem Overnight full pipeline run for a case. Survives Claude Code / terminal exit.
-rem Usage: night_run.bat [case_id] [max_parts]   (default: test3, all parts)
+rem Usage: night_run.bat [case_id] [max_parts] [fast] [animate]
+rem   e.g. night_run.bat test3 0 fast animate  -- all parts, SD 1.5 stills, motion
 set CASE=%1
 if "%CASE%"=="" set CASE=test3
 set PYTHONIOENCODING=utf-8
@@ -17,6 +18,20 @@ if errorlevel 1 goto :fail
 if errorlevel 1 goto :fail
 "venv\Scripts\python.exe" -u run_pipeline.py --case-id %CASE% --stage voiceover >> night_run.log 2>&1
 if errorlevel 1 goto :fail
+rem Animate the generated stills before assembly. 4th arg "animate" turns it
+rem on: it is the slowest step by far (~7 min per shot), so it stays opt-in.
+rem Already-generated clips are skipped, so a re-run resumes rather than redoes.
+rem Scene openers only by default: animating every frame of a 6-part case is
+rem ~160 clips, about 19 hours, which no overnight run finishes. Pass
+rem "animate-all" to do the lot anyway.
+if /i "%4"=="animate" (
+  "venv\Scripts\python.exe" -u tools\animate_frames.py --case-id %CASE% --max-parts %PIPELINE_MAX_PARTS% --per-part 8 >> night_run.log 2>&1
+  if errorlevel 1 goto :fail
+)
+if /i "%4"=="animate-all" (
+  "venv\Scripts\python.exe" -u tools\animate_frames.py --case-id %CASE% --max-parts %PIPELINE_MAX_PARTS% --all-frames >> night_run.log 2>&1
+  if errorlevel 1 goto :fail
+)
 "venv\Scripts\python.exe" -u run_pipeline.py --case-id %CASE% --stage video >> night_run.log 2>&1
 if errorlevel 1 goto :fail
 rem Titles, captions and hashtags -- without this the run leaves stale metadata

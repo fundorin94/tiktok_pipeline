@@ -21,7 +21,7 @@ pornography, a rehearsed fake injury, charm used as a weapon, a double life), sp
 sentences unpacking it: what exactly he did, how it escalated, what it looked like from the \
 outside, what those around him missed. Prefer one vividly developed thread over three facts \
 mentioned in passing -- but never invent details not supported by the brief.
-- HARD CONSTRAINT: each part must be 280-420 words of narration (about 2-3 minutes spoken \
+- HARD CONSTRAINT: each part must be 400-550 words of narration (about 2-3 minutes spoken \
 aloud).
 - HARD CAP: the whole script must have AT MOST 6 parts. Never exceed 6, no matter how much \
 material the brief contains. Aim for 5-6 parts for a well-documented case; use fewer only if \
@@ -36,11 +36,11 @@ skipping the word-count target.
 question that makes the viewer want the next part -- an actual narrative beat (a discovery \
 about to be made, a suspect about to be confronted), not a cheap "but that's not all" filler \
 line.
-- The 280-420 words/part and AT MOST 6 parts caps above are absolute and do not bend for \
+- The 400-550 words/part and AT MOST 6 parts caps above are absolute and do not bend for \
   anything below -- not for splitting scenes more finely, not for including more violent detail, \
   not for covering more victims individually, not for anything else. Splitting into more/shorter \
   scenes must happen INSIDE the same word budget, not by writing more words. If following the \
-  scene-granularity or content guidance below would push a part past 420 words or the script past \
+  scene-granularity or content guidance below would push a part past 550 words or the script past \
   6 parts, cut material (fewer timeline entries, less granular coverage of minor figures) rather \
   than exceed either cap. A script that blows through these caps is a failed script regardless of \
   how well it follows every other instruction.
@@ -304,6 +304,21 @@ def _scene_sentence_count(text: str) -> int:
     return len([s for s in re.split(r"(?<=[.!?])\s+", (text or "").strip()) if s])
 
 
+# Subjects the prompt forbids but the model still asks for now and then --
+# a query for "blood on white pillowcases" got through with the rule sitting
+# right there in the instructions. The image gate caught the frame, but a
+# query that can only produce something unusable wastes a generation slot
+# and would have shipped had the gate blinked.
+_FORBIDDEN_SUBJECTS = re.compile(
+    r"\b(blood|bloody|bloodstain\w*|corpse|dead body|body bag|remains|skeletal|"
+    r"autopsy|wound\w*|injur\w*|gore|strangl\w*|stab\w*|nude|naked)\b", re.I)
+
+
+def _forbidden_query(scene: dict):
+    """Queries asking for something the content rules exclude outright."""
+    return [q for q in (scene.get("visual_queries") or []) if _FORBIDDEN_SUBJECTS.search(q)]
+
+
 def _missing_person_query(scene: dict, known_names: list) -> bool:
     """True when the narration names a known person (victim, perpetrator,
     witness) but no visual query asks for that person -- every named person
@@ -462,9 +477,13 @@ def _repair_scenes_once(client, db, case_id: str, script: dict, known_names: lis
             repeats = overused and any(
                 any(w.strip(",.").lower() in overused for w in q.split())
                 for q in (scene.get("visual_queries") or []))
+            banned = _forbidden_query(scene)
+            if banned:
+                print(f"  rejected forbidden visual(s): {'; '.join(q[:44] for q in banned)}")
             if (_scene_is_undercovered(scene) or _missing_person_query(scene, known_names)
-                    or repeats):
-                bad.append((part, scene, sorted(overused) if repeats else []))
+                    or repeats or banned):
+                avoid = sorted(overused) if repeats else []
+                bad.append((part, scene, avoid))
     if not bad:
         return 0
 
@@ -600,5 +619,5 @@ def run(case_id: str, db) -> None:
     cap_note = "" if len(parts) <= 6 else "  <- EXCEEDS 6-part cap, review prompt/output"
     print(f"  parts: {len(parts)}{cap_note}")
     for p in parts:
-        note = "" if 260 <= p["word_count"] <= 440 else "  <- outside 2-3min target, review"
+        note = "" if 380 <= p["word_count"] <= 570 else "  <- outside 2-3min target, review"
         print(f"    part {p['part_number']}: {p['word_count']} words (~{p['est_seconds']}s){note}")
