@@ -108,7 +108,13 @@ clothed or not, alive or dead, sharp or blurry, at any size;
 - blood, wounds, gore, or graphic violence aftermath;
 - a mannequin, doll, statue or anatomical model of a person.
 
-Otherwise answer safe=true. When unsure about safe, answer safe=false.
+`safe` is about a person being VISIBLE, never about a person being implied. Every scene here is \
+a place people use, so furniture, vehicles, tools, clothing on a rack, a made bed, a ceiling fan, \
+a lit lamp or an open door are all expected and leave safe=true -- "suggests occupancy" is not a \
+reason to fail a frame, and an empty room is the entire point of the shot. Fail it only when you \
+can actually point at a person or a body in the image.
+
+Otherwise answer safe=true. When unsure whether the shape you see is a person, answer safe=false.
 
 Answer text_ok=false only if LETTERING DOMINATES the frame: a sign, headline, poster or document \
 page that the eye reads as a main subject, or any large block of text. Image generation cannot \
@@ -155,11 +161,12 @@ _FATAL_API_MARKERS = (
 
 _SAFETY_CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "safety_cache.json"
 _SAFETY_CACHE = None
-# Bumped when the verdict shape changes. Entries from before the split carry
-# only safe/reason, and a stored safe=false could have meant "a person" or
-# "a modern lamp" -- guessing which would silently re-reject frames the split
-# is meant to keep, so old entries are simply left unread.
-_CACHE_VERSION = "v2"
+# Bump this whenever AI_SAFETY_PROMPT or the verdict shape changes: the key is
+# the image bytes alone, so a cached verdict outlives the rules that produced
+# it. v1 entries carry only safe/reason, and a stored safe=false could have
+# meant "a person" or "a modern lamp" -- guessing which would silently
+# re-reject the frames the split exists to keep, so they are left unread.
+_CACHE_VERSION = "v3"
 
 
 def _cache_key(image_path: str) -> str:
