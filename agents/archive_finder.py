@@ -755,11 +755,11 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
             frames.append(str(dest_path))
 
     from agents.image_generator import generate_image
-    from agents.image_verifier import SafetyCheckUnavailable, ai_frame_is_safe
+    from agents.image_verifier import SafetyCheckUnavailable, ai_frame_verdict
 
-    def vision_gate(path: str) -> bool:
+    def vision_gate(path: str) -> dict:
         try:
-            safe, reason, usage = ai_frame_is_safe(path, era=era)
+            verdict, usage = ai_frame_verdict(path, era=era)
         except SafetyCheckUnavailable as exc:
             raise RuntimeError(
                 "AI frame safety check is unavailable, so generated frames cannot be "
@@ -768,9 +768,12 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
         if usage:
             db.log_usage(case_id, "ai_frame_safety", IMAGE_VERIFY_MODEL,
                          usage.input_tokens, usage.output_tokens)
-        if not safe:
-            print(f"    vision gate rejected a frame: {reason[:80]}", flush=True)
-        return safe
+        # Only the hard verdict is announced as a rejection. A soft flag is
+        # not a rejection -- generate_image decides whether a cleaner re-roll
+        # turns up, and says so itself if it settles for the flagged frame.
+        if not verdict["safe"]:
+            print(f"    vision gate rejected a frame: {verdict['reason'][:80]}", flush=True)
+        return verdict
 
     def generate(prompt: str, wanted: int, start_index: int = 0):
         prompt = _with_era(prompt, era)

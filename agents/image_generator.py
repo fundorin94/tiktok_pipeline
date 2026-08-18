@@ -170,6 +170,12 @@ STYLE_SUFFIX = (
     # Naming the period lighting positively steers the model far better than
     # listing modern fixtures in the negative prompt, which it largely ignores.
     "incandescent and fluorescent lighting of the era, period-correct fixtures, "
+    # Same trick against lettering. The negative prompt already lists every
+    # word for text and still lost 67 frames in one run to dominant signage --
+    # so the surfaces are described as bare here instead, which the model
+    # actually acts on. Queries like "tavern exterior" invite a sign all by
+    # themselves; this is what argues back.
+    "plain unmarked surfaces, blank walls, bare storefront without signage, "
     "candid archival press photo"
 )
 # POLICY (2026-07-24): AI generation renders NO people, period. SD 1.5 kept
@@ -306,13 +312,22 @@ SHOT_MODIFIERS = [
 
 def generate_image(visual_query: str, dest_path: Path, variant: int = 0,
                    vision_gate=None) -> bool:
-    """vision_gate: optional callable(path) -> bool -- a final external
-    safety check (vision model); a False verdict rejects the frame and
-    re-rolls, same as the local detectors."""
+    """vision_gate: optional callable(path) -> verdict dict carrying
+    safe/period_ok/text_ok/reason (see agents.image_verifier.ai_frame_verdict).
+
+    An unsafe verdict rejects the frame and re-rolls, same as the local
+    detectors. A frame that is safe but merely off-period or text-heavy is
+    held aside instead: we re-roll hoping for a clean one, and ship the best
+    flagged frame if none arrives. Treating those two as one verdict is what
+    made the gate expensive -- four rejections in five were a modern-looking
+    lamp or a garbled sign, each paid for with a full re-generation, and a
+    query that never came up clean lost its slot entirely."""
+    spare = dest_path.with_suffix(".spare.png")
     try:
         import torch
         pipe = _get_pipeline()
         prompt = visual_query + SHOT_MODIFIERS[variant % len(SHOT_MODIFIERS)] + STYLE_SUFFIX
+        spare_score, spare_reason = -1, ""
 
         for attempt in range(MAX_NSFW_RETRIES + 1):
             # A fresh random seed every call -- generate_image is invoked once
@@ -351,13 +366,31 @@ def generate_image(visual_query: str, dest_path: Path, variant: int = 0,
             # Third, outermost gate: a vision model looks at the frame and
             # rejects any human/corpse/nudity/gore the local detectors missed
             # (grainy b&w bodies shot from above slipped past both).
-            if vision_gate is not None and not vision_gate(str(dest_path)):
+            if vision_gate is None:
+                return True
+            verdict = vision_gate(str(dest_path))
+            if not verdict["safe"]:
                 dest_path.unlink(missing_ok=True)
                 continue
-            return True
+            if verdict["period_ok"] and verdict["text_ok"]:
+                spare.unlink(missing_ok=True)
+                return True
+            # Safe, but off-period or dominated by lettering. Hold on to the
+            # least-flagged one seen so far and re-roll for something clean.
+            score = int(verdict["period_ok"]) + int(verdict["text_ok"])
+            if score > spare_score:
+                spare_score, spare_reason = score, verdict["reason"]
+                dest_path.replace(spare)
+            else:
+                dest_path.unlink(missing_ok=True)
 
+        if spare_score >= 0:
+            spare.replace(dest_path)
+            print(f"    no clean re-roll -- keeping a flagged frame: {spare_reason[:70]}")
+            return True
         print(f"    AI generation skipped for {visual_query!r}: kept producing a person/unsafe content")
         return False
     except Exception as exc:
+        spare.unlink(missing_ok=True)
         print(f"    AI generation failed for {visual_query!r}: {exc}")
         return False
