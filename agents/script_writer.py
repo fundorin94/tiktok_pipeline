@@ -21,8 +21,9 @@ pornography, a rehearsed fake injury, charm used as a weapon, a double life), sp
 sentences unpacking it: what exactly he did, how it escalated, what it looked like from the \
 outside, what those around him missed. Prefer one vividly developed thread over three facts \
 mentioned in passing -- but never invent details not supported by the brief.
-- HARD CONSTRAINT: each part must be 400-550 words of narration (about 2-3 minutes spoken \
-aloud).
+- HARD CONSTRAINT: each part must be AT LEAST 210 words of narration (about 1.5 minutes spoken \
+aloud). This is a floor, not a target -- a part shorter than that is a failed part. Going longer \
+is fine and often better for a rich case; stay under 1100 words (about 8 minutes) per part.
 - HARD CAP: the whole script must have AT MOST 6 parts. Never exceed 6, no matter how much \
 material the brief contains. Aim for 5-6 parts for a well-documented case; use fewer only if \
 the case genuinely has little material. This is a hard ceiling, not a soft target.
@@ -36,14 +37,14 @@ skipping the word-count target.
 question that makes the viewer want the next part -- an actual narrative beat (a discovery \
 about to be made, a suspect about to be confronted), not a cheap "but that's not all" filler \
 line.
-- The 400-550 words/part and AT MOST 6 parts caps above are absolute and do not bend for \
-  anything below -- not for splitting scenes more finely, not for including more violent detail, \
-  not for covering more victims individually, not for anything else. Splitting into more/shorter \
-  scenes must happen INSIDE the same word budget, not by writing more words. If following the \
-  scene-granularity or content guidance below would push a part past 550 words or the script past \
-  6 parts, cut material (fewer timeline entries, less granular coverage of minor figures) rather \
-  than exceed either cap. A script that blows through these caps is a failed script regardless of \
-  how well it follows every other instruction.
+- The 210-word floor per part and the AT MOST 6 parts cap above are absolute and do not bend for \
+  anything below. A thin part is a failed part: if a part has less than 1.5 minutes of narration \
+  in it, either develop its material properly -- more of the unsettling specifics the brief \
+  gives -- or fold it into a neighbouring part and use one part fewer. Never pad it with filler \
+  or restated summary to clear the floor. If the case has more material than 6 parts can hold, \
+  cut material (fewer timeline entries, less granular coverage of minor figures) rather than \
+  exceed the part cap. A script that breaks either of these is a failed script regardless of how \
+  well it follows every other instruction.
 - Split the narration within each part into "scenes" of 1-3 sentences each.
 - Each scene gets a "visual_queries" LIST -- an ordered list of the concrete things the \
   narration shows AS IT PROGRESSES through that scene. This is the most important rule: the \
@@ -208,6 +209,37 @@ cliffhanger, usable later as part of a video title/caption.
 Output ONLY the JSON object matching the given schema.
 """
 
+# ~1.5 minutes of narration at the 2.3 words/second used by _annotate_lengths.
+# A hard floor: a part thinner than this is a failed part, not a short one.
+MIN_PART_WORDS = 210
+# Long parts are fine for a rich case -- unbounded ones are not, because every
+# extra minute of narration is another hour of frame generation downstream.
+MAX_PART_WORDS = 1100
+
+_SCENE_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "visual_queries": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+        },
+        "visual_anchors": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+        },
+        "visual_fallbacks": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+        },
+    },
+    "required": ["text", "visual_queries", "visual_anchors", "visual_fallbacks"],
+    "additionalProperties": False,
+}
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -221,29 +253,7 @@ SCHEMA = {
                     "hook": {"type": "string"},
                     "scenes": {
                         "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "text": {"type": "string"},
-                                "visual_queries": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "minItems": 1,
-                                },
-                                "visual_anchors": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "minItems": 1,
-                                },
-                                "visual_fallbacks": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "minItems": 1,
-                                },
-                            },
-                            "required": ["text", "visual_queries", "visual_anchors", "visual_fallbacks"],
-                            "additionalProperties": False,
-                        },
+                        "items": _SCENE_ITEM_SCHEMA,
                     },
                 },
                 "required": ["part_number", "hook", "scenes"],
@@ -267,6 +277,112 @@ def _load_brief(case_id: str) -> dict:
     if not path.exists():
         raise RuntimeError(f"brief.json not found for case {case_id} -- run the story stage first")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+_EXPAND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "parts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "part_number": {"type": "integer"},
+                    "extra_scenes": {
+                        "type": "array",
+                        "items": _SCENE_ITEM_SCHEMA,
+                        "minItems": 1,
+                    },
+                },
+                "required": ["part_number", "extra_scenes"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["parts"],
+    "additionalProperties": False,
+}
+
+
+def _part_words(part: dict) -> int:
+    return sum(len(scene.get("text", "").split()) for scene in part["scenes"])
+
+
+def _expand_short_parts(client, db, case_id: str, script: dict, brief: dict) -> int:
+    """Bring parts under the 1.5-minute floor up to it by asking for more
+    narration, instead of printing a warning and shipping them.
+
+    The floor is stated in the prompt as an absolute rule, but a rule that
+    lives only in a prompt is a suggestion: one script came back with all six
+    parts past their stated ceiling, and nothing noticed. Same failure, other
+    direction -- so it is checked here too."""
+    short = [(p, _part_words(p)) for p in script["parts"]]
+    short = [(p, w) for p, w in short if w < MIN_PART_WORDS]
+    if not short:
+        return 0
+
+    print(f"  {len(short)} part(s) under the {MIN_PART_WORDS}-word floor -- asking for more narration",
+          flush=True)
+    payload = [{
+        "part_number": p["part_number"],
+        "hook": p.get("hook", ""),
+        "existing_narration": " ".join(s.get("text", "") for s in p["scenes"]),
+        "words_now": w,
+        "words_to_add_at_least": MIN_PART_WORDS - w,
+    } for p, w in short]
+
+    response = client.messages.create(
+        model=SCRIPT_MODEL,
+        max_tokens=16000,
+        system=SYSTEM_PROMPT + "\n\nYou are now EXTENDING parts that came in under the "
+        f"{MIN_PART_WORDS}-word floor. For each part given, return extra_scenes that CONTINUE it: "
+        "new narration to append after its existing text, following every scene rule above "
+        "(1-3 sentences per scene, visual_queries/visual_anchors/visual_fallbacks of equal "
+        "length, anchors verbatim from that scene's own new text). Add at least "
+        "words_to_add_at_least words across the new scenes. Develop material the brief actually "
+        "supports -- the specifics that make the case unsettling -- and never restate what the "
+        "existing narration already said, or pad with filler to reach the count. Keep the part's "
+        "cliffhanger working: the new scenes come before it in effect, so end them on the beat "
+        "that leads into the next part.",
+        messages=[{"role": "user", "content": json.dumps(
+            {"brief": brief, "parts": payload}, ensure_ascii=False)}],
+        output_config={"format": {"type": "json_schema", "schema": _EXPAND_SCHEMA}},
+    )
+    db.log_usage(case_id, "script_expand", SCRIPT_MODEL,
+                 response.usage.input_tokens, response.usage.output_tokens)
+
+    blocks = [b.text for b in response.content if b.type == "text"]
+    if not blocks:
+        print(f"  warning: the expansion came back empty (stop_reason={response.stop_reason}); "
+              "short parts keep their length")
+        return 0
+    try:
+        extensions = json.loads(blocks[0])["parts"]
+    except (json.JSONDecodeError, KeyError):
+        print(f"  warning: the expansion came back unusable (stop_reason={response.stop_reason}); "
+              "short parts keep their length")
+        return 0
+
+    by_number = {p["part_number"]: p for p in script["parts"]}
+    grown = 0
+    for extension in extensions:
+        part = by_number.get(extension["part_number"])
+        scenes = [s for s in extension.get("extra_scenes") or []
+                  if s.get("text") and len(s.get("visual_queries") or []) ==
+                  len(s.get("visual_anchors") or []) == len(s.get("visual_fallbacks") or [])]
+        if part is None or not scenes:
+            continue
+        part["scenes"].extend(scenes)
+        grown += 1
+
+    # One round only. A part that is still short ships with a warning rather
+    # than failing the stage -- the script is usable, just thinner than asked.
+    for part in script["parts"]:
+        words = _part_words(part)
+        if words < MIN_PART_WORDS:
+            print(f"  warning: part {part['part_number']} is still {words} words, "
+                  f"under the {MIN_PART_WORDS}-word floor")
+    return grown
 
 
 def _annotate_lengths(script: dict) -> dict:
@@ -598,6 +714,11 @@ def run(case_id: str, db) -> None:
         raise RuntimeError("Model returned no text content")
 
     script = json.loads(text_blocks[0])
+    # Length first: the repair and split passes below work per scene, so any
+    # scene added here still goes through them.
+    grown = _expand_short_parts(client, db, case_id, script, brief)
+    if grown:
+        print(f"  {grown} short part(s) extended to clear the {MIN_PART_WORDS}-word floor")
     known_names = [p["name"] for p in brief.get("key_people", [])]
     repaired = _repair_scenes(client, db, case_id, script, known_names)
     if repaired:
@@ -619,5 +740,10 @@ def run(case_id: str, db) -> None:
     cap_note = "" if len(parts) <= 6 else "  <- EXCEEDS 6-part cap, review prompt/output"
     print(f"  parts: {len(parts)}{cap_note}")
     for p in parts:
-        note = "" if 380 <= p["word_count"] <= 570 else "  <- outside 2-3min target, review"
+        if p["word_count"] < MIN_PART_WORDS:
+            note = f"  <- UNDER the {MIN_PART_WORDS}-word floor (~1.5min), review"
+        elif p["word_count"] > MAX_PART_WORDS:
+            note = f"  <- over {MAX_PART_WORDS} words, every extra minute costs an hour of frames"
+        else:
+            note = ""
         print(f"    part {p['part_number']}: {p['word_count']} words (~{p['est_seconds']}s){note}")
