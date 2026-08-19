@@ -164,18 +164,17 @@ INFERENCE_STEPS = 25 if FAST_MODE else 28
 GUIDANCE_SCALE = 7.0 if FAST_MODE else 5.5  # SD 1.5 needs stronger CFG
 MAX_NSFW_RETRIES = 4  # re-roll the seed if a frame is flagged nude/unsafe
 
+# CLIP cuts the prompt at 77 tokens and silently drops the tail, so this
+# suffix lives on a budget: near 37 tokens, leaving room for the query and the
+# shot modifier. Anything appended here is paid for by something at the end
+# falling off unnoticed -- a longer version of this string was losing its own
+# last clause on every frame it generated.
+# The decade is deliberately NOT named: _with_era appends the case's own
+# period, and hardcoding "1970s" here styled a 1936 Ukrainian village as a
+# 1970s press photo for the whole of the Chikatilo run.
 STYLE_SUFFIX = (
-    ", empty scene, no people, 1970s documentary photograph, black and white, "
-    "grainy 35mm film, photorealistic, real photograph, sharp focus, "
-    # Naming the period lighting positively steers the model far better than
-    # listing modern fixtures in the negative prompt, which it largely ignores.
-    "incandescent and fluorescent lighting of the era, period-correct fixtures, "
-    # Same trick against lettering. The negative prompt already lists every
-    # word for text and still lost 67 frames in one run to dominant signage --
-    # so the surfaces are described as bare here instead, which the model
-    # actually acts on. Queries like "tavern exterior" invite a sign all by
-    # themselves; this is what argues back.
-    "plain unmarked surfaces, blank walls, bare storefront without signage, "
+    ", empty scene, no people, documentary photograph, black and white, "
+    "grainy 35mm film, period-correct fixtures, unmarked surfaces, no signage, "
     "candid archival press photo"
 )
 # POLICY (2026-07-24): AI generation renders NO people, period. SD 1.5 kept
