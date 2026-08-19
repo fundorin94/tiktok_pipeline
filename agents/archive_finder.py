@@ -688,6 +688,31 @@ def _search_all(query: str, known_people: set | None = None) -> list[dict]:
     return _rank_candidates(query, candidates, known_people)
 
 
+MANUAL_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
+
+
+def _manual_frames(case_id: str, tag: str) -> list:
+    """Photos dropped in by hand for this exact query, newest naming wins.
+
+    Files live in media/manual/ and are named after the query they answer:
+    part2_scene2_q0.jpg, plus part2_scene2_q0_2.jpg for a second frame. The
+    folder is the one place in media/ the archive stage never wipes, so a
+    photo found by hand survives re-running the stage -- otherwise every
+    rerun would silently throw away the manual work and go back to asking
+    the internet for a picture that isn't there."""
+    folder = _case_dir(case_id) / "media" / "manual"
+    if not folder.is_dir():
+        return []
+    found = []
+    for path in sorted(folder.iterdir()):
+        if path.suffix.lower() not in MANUAL_EXTENSIONS:
+            continue
+        stem = path.stem
+        if stem == tag or (stem.startswith(tag + "_") and stem[len(tag) + 1:].isdigit()):
+            found.append(str(path))
+    return found
+
+
 def _resolve_query(case_id, part_number, scene_index, q_index, query, known_people,
                    frames_wanted, next_index_for_query, db, fallback_query: str = "",
                    era: str = ""):
@@ -702,6 +727,17 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
     - review_frames: mugshot frames staged for manual review (NOT auto-played)
     """
     tag = f"part{part_number}_scene{scene_index}_q{q_index}"
+
+    # A hand-supplied photo beats everything: it was chosen by a person who
+    # looked at it, which no search or generator here can claim. Checked
+    # before the search so it also costs nothing.
+    manual = _manual_frames(case_id, tag)
+    if manual:
+        print(f"    using {len(manual)} hand-supplied frame(s)", flush=True)
+        return {"query": query, "kind": "manual", "status": "found",
+                "frames": manual, "review_frames": [],
+                "note": "supplied by hand in media/manual"}
+
     is_person = _looks_like_person_name(query, known_people)
     candidates = _search_all(query, known_people)
 
@@ -875,6 +911,9 @@ def run(case_id: str, db) -> None:
     # after script edits) stay on disk under the same media/ subfolders --
     # orphaned images no longer referenced by any manifest, but still
     # visible and confusing when browsing the folder directly.
+    # "manual" is deliberately absent: it holds photos a person sourced by
+    # hand, and wiping those on every rerun would throw away the only work
+    # here that cannot be redone automatically.
     for subfolder in ("accepted", "review", "ai_generated"):
         shutil.rmtree(_media_dir(case_id, subfolder), ignore_errors=True)
 
