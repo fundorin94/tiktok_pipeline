@@ -91,45 +91,28 @@ SCHEMA = {
 # NudeNet body parts) miss grainy b&w edge cases -- e.g. an unclothed body
 # lying on a floor shot from above passed both. AI frames must contain no
 # human at all, so this is a strict binary judgement by a vision model.
-AI_SAFETY_PROMPT = """You are the gate for AI-generated b-roll frames in a true-crime \
-documentary. The frame is supposed to show ONLY places, objects, documents, vehicles or \
-landscapes -- absolutely no people.
+_PEOPLE_RULE_EMPTY = """The frame is supposed to show ONLY places, objects, documents, vehicles or landscapes -- absolutely no people."""
 
-You give THREE SEPARATE verdicts, and they are not equally serious. `safe` is a hard rule: a \
-frame failing it can never be used. `period_ok` and `text_ok` are quality preferences, used to \
-choose between frames that are already safe -- judge them honestly, but do not let them colour \
-the `safe` verdict.
+_PEOPLE_RULE_FIGURES = """The frame is supposed to show a scene with ANONYMOUS FIGURES in it: people seen from behind, in silhouette, at a distance, or cropped so that no face is visible. Those figures are wanted -- a back, a shoulder, a coat, a crowd seen from behind all leave safe=true. What must never appear is a FACE: no recognisable facial features at any size, front or profile, and none in a mirror, window or reflection. A frame that reads as a portrait of an identifiable individual fails, however small the face is."""
+
+AI_SAFETY_PROMPT = """You are the gate for AI-generated b-roll frames in a true-crime documentary. {people_rule}
+
+You give THREE SEPARATE verdicts, and they are not equally serious. `safe` is a hard rule: a frame failing it can never be used. `period_ok` and `text_ok` are quality preferences, used to choose between frames that are already safe -- judge them honestly, but do not let them colour the `safe` verdict.
 
 Answer safe=false if the image contains ANY of:
-- a human being or any part of one (face, body, torso, limbs, hands, silhouette, reflection), \
-clothed or not, alive or dead, sharp or blurry, at any size;
+{human_clause}
 - a corpse or anything reading as a dead/unconscious body, body bag, or human-shaped covered form;
 - nudity or partial nudity of any kind;
 - blood, wounds, gore, or graphic violence aftermath;
 - a mannequin, doll, statue or anatomical model of a person.
 
-`safe` is about a person being VISIBLE, never about a person being implied. Every scene here is \
-a place people use, so furniture, vehicles, tools, clothing on a rack, a made bed, a ceiling fan, \
-a lit lamp or an open door are all expected and leave safe=true -- "suggests occupancy" is not a \
-reason to fail a frame, and an empty room is the entire point of the shot. Fail it only when you \
-can actually point at a person or a body in the image.
+{implication_clause}
 
-Otherwise answer safe=true. When unsure whether the shape you see is a person, answer safe=false.
+Otherwise answer safe=true.
 
-Answer text_ok=false only if LETTERING DOMINATES the frame: a sign, headline, poster or document \
-page that the eye reads as a main subject, or any large block of text. Image generation cannot \
-spell, so text at that size reads as obvious gibberish. Small incidental markings are FINE and \
-must leave text_ok=true -- a logo on a hubcap, a distant shopfront, a spine on a shelf, faint \
-background lettering.
+Answer text_ok=false only if LETTERING DOMINATES the frame: a sign, headline, poster or document page that the eye reads as a main subject, or any large block of text. Image generation cannot spell, so text at that size reads as obvious gibberish. Small incidental markings are FINE and must leave text_ok=true -- a logo on a hubcap, a distant shopfront, a spine on a shelf, faint background lettering.
 
-Answer period_ok=false only if an object that plainly could not exist in the stated period is \
-clearly visible: flat-screen / plasma / LCD television, computer monitor, laptop, mobile phone, \
-or a car whose body shape is obviously from a later decade. Judge only unmistakable \
-anachronisms -- a plain room, wall, floor or furniture that merely looks clean, undated or \
-ambiguous in style is period_ok=true. LIGHTING IS NEVER AN ANACHRONISM: flat ceiling panels, \
-strip lights and tall street lamps all existed as fluorescent and sodium fittings in the \
-1960s-70s, and in grainy black and white they are indistinguishable from modern LED equivalents. \
-Ignore lighting entirely when judging the period.
+Answer period_ok=false only if an object that plainly could not exist in the stated period is clearly visible: flat-screen / plasma / LCD television, computer monitor, laptop, mobile phone, or a car whose body shape is obviously from a later decade. Judge only unmistakable anachronisms -- a plain room, wall, floor or furniture that merely looks clean, undated or ambiguous in style is period_ok=true. LIGHTING IS NEVER AN ANACHRONISM: flat ceiling panels, strip lights and tall street lamps all existed as fluorescent and sodium fittings in the 1960s-70s, and in grainy black and white they are indistinguishable from modern LED equivalents. Ignore lighting entirely when judging the period.
 
 Put the reason for whichever verdict is false in `reason`, most serious first.
 Answer with a JSON object only."""
@@ -145,6 +128,23 @@ AI_SAFETY_SCHEMA = {
     "required": ["safe", "period_ok", "text_ok", "reason"],
     "additionalProperties": False,
 }
+
+
+_HUMAN_CLAUSE_EMPTY = """- a human being or any part of one (face, body, torso, limbs, hands, silhouette, reflection), clothed or not, alive or dead, sharp or blurry, at any size;"""
+
+_HUMAN_CLAUSE_FIGURES = """- a visible human FACE or recognisable facial features, at any size, front or profile, including one in a mirror, window or other reflection;"""
+
+_IMPLICATION_EMPTY = """`safe` is about a person being VISIBLE, never about a person being implied. Every scene here is a place people use, so furniture, vehicles, tools, clothing on a rack, a made bed, a ceiling fan, a lit lamp or an open door are all expected and leave safe=true -- "suggests occupancy" is not a reason to fail a frame, and an empty room is the entire point of the shot. Fail it only when you can actually point at a person or a body."""
+
+_IMPLICATION_FIGURES = """Judge only what is visible. A figure with its back turned, a silhouette against a window, a shape too distant to read, a hand at the edge of frame -- none of these is a face, and none of them fails. Fail the frame when you can actually see facial features."""
+
+
+def _safety_prompt(people_allowed: bool) -> str:
+    return AI_SAFETY_PROMPT.format(
+        people_rule=_PEOPLE_RULE_FIGURES if people_allowed else _PEOPLE_RULE_EMPTY,
+        human_clause=_HUMAN_CLAUSE_FIGURES if people_allowed else _HUMAN_CLAUSE_EMPTY,
+        implication_clause=_IMPLICATION_FIGURES if people_allowed else _IMPLICATION_EMPTY,
+    )
 
 
 class SafetyCheckUnavailable(RuntimeError):
@@ -166,12 +166,16 @@ _SAFETY_CACHE = None
 # it. v1 entries carry only safe/reason, and a stored safe=false could have
 # meant "a person" or "a modern lamp" -- guessing which would silently
 # re-reject the frames the split exists to keep, so they are left unread.
-_CACHE_VERSION = "v3"
+_CACHE_VERSION = "v4"
 
 
-def _cache_key(image_path: str) -> str:
+def _cache_key(image_path: str, people_allowed: bool) -> str:
+    """The mode is part of the key: the same bytes get a different verdict
+    depending on whether figures were allowed, and reusing one for the other
+    would either smuggle a face through or reject a legitimate back view."""
     import hashlib
-    return _CACHE_VERSION + ":" + hashlib.sha1(Path(image_path).read_bytes()).hexdigest()
+    mode = "figures" if people_allowed else "empty"
+    return f"{_CACHE_VERSION}:{mode}:" + hashlib.sha1(Path(image_path).read_bytes()).hexdigest()
 
 
 def _cache_get(key: str):
@@ -194,7 +198,7 @@ def _cache_put(key: str, verdict: dict) -> None:
         pass  # cache is an optimization, never fail a run over it
 
 
-def ai_frame_verdict(image_path: str, era: str = ""):
+def ai_frame_verdict(image_path: str, era: str = "", people_allowed: bool = False):
     """Returns (verdict: dict, usage). The verdict carries three separate
     judgements:
 
@@ -210,7 +214,7 @@ def ai_frame_verdict(image_path: str, era: str = ""):
 
     Fails CLOSED on safe: any API or parsing error counts as unsafe, so an
     unchecked frame can never ship."""
-    cache_key = _cache_key(image_path)
+    cache_key = _cache_key(image_path, people_allowed)
     hit = _cache_get(cache_key)
     if hit is not None:
         return hit, None
@@ -223,7 +227,7 @@ def ai_frame_verdict(image_path: str, era: str = ""):
 
     last_error = ""
     for attempt in range(3):
-        verdict, usage = _ask_safety(client, data, media_type, question)
+        verdict, usage = _ask_safety(client, data, media_type, question, people_allowed)
         if usage is not None:  # a real verdict
             _cache_put(cache_key, verdict)
             return verdict, usage
@@ -234,12 +238,13 @@ def ai_frame_verdict(image_path: str, era: str = ""):
     raise SafetyCheckUnavailable(last_error)
 
 
-def _ask_safety(client, data: str, media_type: str, question: str):
+def _ask_safety(client, data: str, media_type: str, question: str,
+                people_allowed: bool = False):
     try:
         response = client.messages.create(
             model=IMAGE_VERIFY_MODEL,
             max_tokens=300,
-            system=AI_SAFETY_PROMPT,
+            system=_safety_prompt(people_allowed),
             messages=[{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}},
                 {"type": "text", "text": question},

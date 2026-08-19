@@ -132,6 +132,7 @@ line.
     descriptor about their body or death ("... skeletal remains", "... autopsy", "... body"). \
     Such queries can only ever return something unusable or grotesque; if the beat is about a \
     discovery, use the place instead ("wooded hillside search area, overcast").
+  - PEOPLE ARE ALLOWED, but only as ANONYMOUS FIGURES: "commuters seen from behind on a     station platform", "a teacher at a blackboard, back to the room", "queue of shoppers,     figures in winter coats". Never a face, never a portrait, never a named individual (those     get a plain-name query of their own and are sourced from real archive photos). A scene of a     place people use reads as dead when it is always empty -- a distant, faceless figure is what     a documentary puts there, and it is what these queries should ask for.
   - CRIME SCENES are always AFTERMATH WITHOUT A VICTIM: no body, no blood, no gore, nothing \
     body-shaped (no covered forms, no chalk outlines). Convey it through the disturbed place \
     itself: "1970s bedroom with overturned nightstand and police evidence markers", "police tape \
@@ -427,7 +428,14 @@ def _scene_sentence_count(text: str) -> int:
 # and would have shipped had the gate blinked.
 _FORBIDDEN_SUBJECTS = re.compile(
     r"\b(blood|bloody|bloodstain\w*|corpse|dead body|body bag|remains|skeletal|"
-    r"autopsy|wound\w*|injur\w*|gore|strangl\w*|stab\w*|nude|naked)\b", re.I)
+    r"autopsy|wound\w*|injur\w*|gore|strangl\w*|stab\w*|nude|naked|"
+    # The Chikatilo run showed the first list was written for one case and
+    # not for the vocabulary of another: "one breast removed mutilation",
+    # "eyes cut out victim" and "body slit open neck to genitalia" all
+    # sailed through it and were handed to the image model five times each.
+    r"mutilat\w*|dismember\w*|disembowel\w*|decapitat\w*|sever\w*ed|"
+    r"gouge\w*|slit|cut out|cut off|bite mark\w*|genitalia|breast\w*|"
+    r"exhum\w*|excavat\w*|torture\w*|mutilation|victim\'s body)\b", re.I)
 
 
 def _forbidden_query(scene: dict):
@@ -582,7 +590,35 @@ def _repair_scenes(client, db, case_id: str, script: dict, known_names: list,
         total += repaired
         if repaired == 0:
             break
+    _drop_forbidden_queries(script)
     return total
+
+
+def _drop_forbidden_queries(script: dict) -> None:
+    """Last line of defence: strike any forbidden query that survived the
+    repair rounds instead of shipping it.
+
+    The rounds are capped, so a case whose whole subject is mutilation can
+    exhaust them and hand the archive stage a query like "eyes cut out
+    victim" -- which the image gate then refuses five times over, at a full
+    generation each, having produced nothing. Better to lose the visual beat
+    here for free. The three per-query lists are index-paired, so they are
+    trimmed together or the narration sync silently shifts."""
+    dropped = 0
+    for part in script["parts"]:
+        for scene in part["scenes"]:
+            queries = scene.get("visual_queries") or []
+            keep = [i for i, q in enumerate(queries) if not _FORBIDDEN_SUBJECTS.search(q)]
+            if len(keep) == len(queries):
+                continue
+            dropped += len(queries) - len(keep)
+            for key in ("visual_queries", "visual_fallbacks", "visual_anchors"):
+                values = scene.get(key) or []
+                if len(values) == len(queries):
+                    scene[key] = [values[i] for i in keep]
+            scene["visual_queries"] = [queries[i] for i in keep]
+    if dropped:
+        print(f"  dropped {dropped} forbidden visual(s) that survived repair", flush=True)
 
 
 def _repair_scenes_once(client, db, case_id: str, script: dict, known_names: list) -> int:
@@ -615,6 +651,12 @@ def _repair_scenes_once(client, db, case_id: str, script: dict, known_names: lis
         }
         if overused:
             entry["avoid_subjects"] = overused
+        # Without this the repair was blind: the scene came back rewritten but
+        # nobody had told the model WHY, so it reached for the same graphic
+        # subject again and burned another round.
+        banned_here = _forbidden_query(s)
+        if banned_here:
+            entry["forbidden_queries_rewrite_these"] = banned_here
         payload.append(entry)
 
     # Repair in batches. A whole 6-part case needs far more scenes rewritten

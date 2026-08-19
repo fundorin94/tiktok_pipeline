@@ -177,6 +177,28 @@ def _case_era(brief: dict) -> str:
     return f"{(years[len(years) // 2] // 10) * 10}s"
 
 
+_PEOPLE_WORDS = re.compile(
+    r"\b(people|person|men|man|women|woman|boys?|girls?|child(ren)?|kids?|"
+    r"crowd|crowded|commuters?|passengers?|pedestrians?|shoppers?|queue|line of|"
+    r"teacher|student|pupils?|classroom|workers?|miners?|soldiers?|officers?|"
+    r"police|detectives?|investigators?|witness(es)?|suspects?|prisoners?|"
+    r"couple|wedding|bride|groom|guests?|parents?|mothers?|fathers?|family|"
+    r"funeral|mourners?|onlookers?|bystanders?|figures?|silhouettes?|"
+    r"custody|arrested|waiting|walking|standing)\b", re.I)
+
+
+def _wants_people(query: str) -> bool:
+    """Does this query describe a scene with people in it?
+
+    Such a query used to be unfulfillable: the archive rarely has the photo,
+    and AI generation refused every frame with a person, so the query burned
+    five generations and produced nothing -- 69% of everything abandoned in
+    the Chikatilo run. These are now rendered as anonymous figures seen from
+    behind, which is what a documentary does with them anyway. Named real
+    people are handled elsewhere and never reach this."""
+    return bool(_PEOPLE_WORDS.search(query))
+
+
 def _with_era(prompt: str, era: str) -> str:
     """Add the period to a prompt that doesn't state one. Without it the
     model renders the present day -- a flat-screen television appeared over
@@ -757,9 +779,9 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
     from agents.image_generator import generate_image
     from agents.image_verifier import SafetyCheckUnavailable, ai_frame_verdict
 
-    def vision_gate(path: str) -> dict:
+    def vision_gate(path: str, people: bool = False) -> dict:
         try:
-            verdict, usage = ai_frame_verdict(path, era=era)
+            verdict, usage = ai_frame_verdict(path, era=era, people_allowed=people)
         except SafetyCheckUnavailable as exc:
             raise RuntimeError(
                 "AI frame safety check is unavailable, so generated frames cannot be "
@@ -776,10 +798,14 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
         return verdict
 
     def generate(prompt: str, wanted: int, start_index: int = 0):
+        # Decided from the query text before the era is appended -- the era is
+        # a bare year and carries no hint of who is in the shot.
+        people = _wants_people(prompt)
         prompt = _with_era(prompt, era)
         for ai_idx in range(start_index, wanted):
             dest_path = _media_dir(case_id, "ai_generated") / f"{tag}_ai{ai_idx}.png"
-            if generate_image(prompt, dest_path, variant=ai_idx, vision_gate=vision_gate):
+            if generate_image(prompt, dest_path, variant=ai_idx,
+                              vision_gate=vision_gate, people=people):
                 frames.append(str(dest_path))
 
     if is_person:

@@ -97,20 +97,28 @@ def _detect(image_path: str):
         ascii_tmp.unlink(missing_ok=True)
 
 
-def _is_unsafe(image_path: str) -> bool:
-    """A generated frame is unsafe if it contains any nudity OR any human
-    face. AI output must be people-free (places/objects/documents only), so
-    any detected face means the model wrongly drew a person -- reject it.
-    Two independent detectors: YuNet catches small/distant/profile faces
-    and collages; NudeNet's body-part labels catch everything else human --
-    since NO people are allowed in AI frames, ANY body-part detection
-    (face, belly, feet, armpits, breast -- covered or exposed alike) means
-    the model drew a person and the frame is rejected."""
+def _is_unsafe(image_path: str, people_allowed: bool = False) -> bool:
+    """Local detectors, run before the vision model because they are free.
+
+    A visible FACE is always fatal, in both modes. That veto is the whole
+    safety net once figures are allowed: a "from behind" prompt still turns
+    a head, catches a profile, puts a face in a mirror or stands a bystander
+    facing camera in the background, and YuNet is what catches it.
+
+    What differs is the body. With people_allowed=False the frame is meant to
+    be empty, so ANY NudeNet body-part hit (belly, feet, armpits -- covered or
+    not) means the model drew a person that does not belong there. With
+    people_allowed=True a back, a shoulder or a pair of legs is the point of
+    the shot, so only actual exposed nudity is fatal."""
     if _face_count(image_path) > 0:
         return True
     detections = _detect(image_path)
     if detections is None:
         return True  # detector failed -> fail safe, drop the frame
+    if people_allowed:
+        return any(d.get("class") in _NUDE_EXPOSED_LABELS
+                   and d.get("score", 0) >= _NUDE_SCORE_THRESHOLD
+                   for d in detections)
     # every NudeNet label is a human body part -> any hit means a person
     return any(x.get("score", 0) >= _PERSON_PART_THRESHOLD for x in detections)
 
@@ -183,29 +191,39 @@ STYLE_SUFFIX = (
 # objects, evidence props, documents, vehicles and landscapes; humans appear
 # in the video exclusively via real archive photos. A face detector below
 # hard-rejects any frame where a person slipped in anyway.
+# CLIP truncates the negative prompt at 77 tokens too, and silently. The old
+# version ran to 264 -- so 72% of it, every anti-text and anti-anachronism
+# term in it, never reached the model at all. That is why frames kept being
+# rejected for signage and modern fixtures the negative prompt already named.
+# Both variants below are kept under 75 tokens and ordered by what the gate
+# actually rejects: lettering first, period second, safety terms last (the
+# detectors and the vision gate are the real backstop there, this is steering).
+_NEG_SHARED = (
+    "corpse, blood, gore, nude, "
+    "text, letters, signage, sign, poster, watermark, logo, "
+    "flat screen tv, computer monitor, laptop, smartphone, modern car, "
+    "modern furniture, cartoon, painting, 3d render, lowres, color"
+)
+# Empty-place frames: push every trace of a person out.
 NEGATIVE_PROMPT = (
-    "person, people, human, human figure, man, woman, boy, girl, child, "
-    "face, portrait, headshot, body, torso, silhouette, crowd, pedestrian, "
-    "mannequin, statue of a person, dress form, clothes on a hanger, "
-    "garment display, legs, arms, hands, "
-    "skull, skeleton, teeth, jaw, anatomy model, body part, "
-    "corpse, dead body, body bag, blood, bloodstain, gore, wound, "
-    "nude, naked, nsfw, erotic, sexual, suggestive, bare skin, "
-    "anime, manga, cartoon, illustration, painting, drawing, sketch, cgi, "
-    "3d render, collage, photo grid, yearbook, "
-    "deformed, disfigured, malformed, extra limbs, mutated hands, "
-    # SD cannot spell: any attempt at lettering renders as broken pseudo-text,
-    # so all writing is pushed out of frame rather than merely discouraged.
-    "text, letters, words, writing, handwriting, typography, font, caption, "
-    "subtitles, signage, sign, poster, headline, newspaper text, document text, "
-    "label, watermark, signature, logo, gibberish text, garbled letters, "
-    # Period drift: SD defaults to present-day interiors (a plasma TV turned
-    # up over a 1974 fireplace), so modern technology is pushed out of frame.
-    "flat screen tv, plasma tv, lcd, led, computer monitor, laptop, "
-    "smartphone, mobile phone, modern car, modern interior, modern furniture, "
-    "digital display, usb, minimalist decor, "
-    "low quality, lowres, jpeg artifacts, oversaturated, color, "
-    "guitar, musician, band, concert, stage"
+    "person, people, face, figure, body, silhouette, crowd, hands, mannequin, "
+    + _NEG_SHARED
+)
+# Figure frames: people are wanted, faces are not. A back, a shoulder or a
+# distant shape carries the scene; a face makes it a portrait of someone who
+# does not exist, or worse, of someone who does.
+PEOPLE_NEGATIVE_PROMPT = (
+    "face, facing camera, looking at viewer, portrait, headshot, deformed, "
+    "extra limbs, " + _NEG_SHARED
+)
+
+# Companion to STYLE_SUFFIX for frames that are allowed figures. Same token
+# budget, and it must actively ask for the back of the shot -- left to itself
+# the model turns everyone around to face the camera.
+PEOPLE_STYLE_SUFFIX = (
+    ", seen from behind, faces not visible, distant anonymous figures, "
+    "documentary photograph, black and white, grainy 35mm film, "
+    "unmarked surfaces, no signage, candid archival press photo"
 )
 
 
@@ -310,7 +328,7 @@ SHOT_MODIFIERS = [
 
 
 def generate_image(visual_query: str, dest_path: Path, variant: int = 0,
-                   vision_gate=None) -> bool:
+                   vision_gate=None, people: bool = False) -> bool:
     """vision_gate: optional callable(path) -> verdict dict carrying
     safe/period_ok/text_ok/reason (see agents.image_verifier.ai_frame_verdict).
 
@@ -325,7 +343,9 @@ def generate_image(visual_query: str, dest_path: Path, variant: int = 0,
     try:
         import torch
         pipe = _get_pipeline()
-        prompt = visual_query + SHOT_MODIFIERS[variant % len(SHOT_MODIFIERS)] + STYLE_SUFFIX
+        suffix = PEOPLE_STYLE_SUFFIX if people else STYLE_SUFFIX
+        negative = PEOPLE_NEGATIVE_PROMPT if people else NEGATIVE_PROMPT
+        prompt = visual_query + SHOT_MODIFIERS[variant % len(SHOT_MODIFIERS)] + suffix
         spare_score, spare_reason = -1, ""
 
         for attempt in range(MAX_NSFW_RETRIES + 1):
@@ -338,7 +358,7 @@ def generate_image(visual_query: str, dest_path: Path, variant: int = 0,
             generator = torch.Generator().manual_seed(secrets.randbelow(2**31))
             out = pipe(
                 prompt=prompt,
-                negative_prompt=NEGATIVE_PROMPT,
+                negative_prompt=negative,
                 num_inference_steps=INFERENCE_STEPS,
                 guidance_scale=GUIDANCE_SCALE,
                 width=GEN_WIDTH,
@@ -359,7 +379,7 @@ def generate_image(visual_query: str, dest_path: Path, variant: int = 0,
             # face (AI should render only objects/places -- a face means it
             # wrongly drew a person). Re-roll on a new seed; drop the frame
             # entirely if it keeps producing people.
-            if _is_unsafe(str(dest_path)):
+            if _is_unsafe(str(dest_path), people_allowed=people):
                 dest_path.unlink(missing_ok=True)
                 continue
             # Third, outermost gate: a vision model looks at the frame and
@@ -367,7 +387,7 @@ def generate_image(visual_query: str, dest_path: Path, variant: int = 0,
             # (grainy b&w bodies shot from above slipped past both).
             if vision_gate is None:
                 return True
-            verdict = vision_gate(str(dest_path))
+            verdict = vision_gate(str(dest_path), people)
             if not verdict["safe"]:
                 dest_path.unlink(missing_ok=True)
                 continue
