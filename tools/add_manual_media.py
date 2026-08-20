@@ -18,9 +18,16 @@ visual_anchors, and a face landing on the wrong sentence is worse than no face.
 Re-running the archive stage picks these up too (media/manual is the one
 folder it never wipes); this tool is the shortcut that avoids re-running it.
 
+Mugshots are a separate case. The archive stage downloads one when a query
+asks for it, but parks it in media/review/ instead of playing it, because
+putting a real person's police photograph on screen is a decision for a human.
+--approve-review is that decision being taken: it moves everything staged in
+review/ into the scenes that asked for it.
+
 Usage:
   python tools/add_manual_media.py chikatilo
   python tools/add_manual_media.py chikatilo --dry-run
+  python tools/add_manual_media.py chikatilo --approve-review
 """
 import json
 import re
@@ -48,25 +55,62 @@ def _insert_at(local_paths: list, q_index: int) -> int:
     return len(local_paths)
 
 
+def _approve_review(manifest: dict, case_dir: Path, dry_run: bool) -> int:
+    """Play the mugshots that were staged for a human to look at."""
+    approved = 0
+    for item in manifest["items"]:
+        frames = item.get("review_frames") or []
+        for frame in frames:
+            if not Path(frame).is_file():
+                print(f"  ? {Path(frame).name}: staged but missing from disk -- skipped")
+                continue
+            if frame in item["local_paths"]:
+                continue
+            found = Q_IN_PATH.search(Path(frame).stem)
+            q_index = int(found.group(1)) if found else len(item["local_paths"])
+            item["local_paths"].insert(_insert_at(item["local_paths"], q_index), frame)
+            was = item.get("status")
+            if was not in APPROVED:
+                item["status"] = "resolved"
+            print(f"  + {Path(frame).name}  approved into part{item['part_number']} "
+                  f"scene{item['scene_index']}" + (f" (was '{was}')" if was not in APPROVED else ""))
+            approved += 1
+        if frames and not dry_run:
+            # Cleared so the publisher stops counting this as outstanding --
+            # the file stays on disk, it is the pending flag that is resolved.
+            item["review_frames"] = []
+    if approved and not dry_run:
+        queue_path = case_dir / "review_queue.json"
+        if queue_path.exists():
+            queue_path.write_text("[]", encoding="utf-8")
+    return approved
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if not args:
         raise SystemExit("usage: python tools/add_manual_media.py <case_id> [--dry-run]")
-    case_id, dry_run = args[0], "--dry-run" in sys.argv[1:]
+    case_id = args[0]
+    dry_run = "--dry-run" in sys.argv[1:]
+    approve = "--approve-review" in sys.argv[1:]
 
     case_dir = ROOT / "data" / "cases" / case_id
     manifest_path = case_dir / "media_manifest.json"
     if not manifest_path.exists():
         raise SystemExit(f"{manifest_path} not found -- run the archive stage first")
-    folder = case_dir / "media" / "manual"
-    if not folder.is_dir():
-        raise SystemExit(f"nothing to add: {folder} does not exist")
-
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     by_scene = {(i["part_number"], i["scene_index"]): i for i in manifest["items"]}
 
     added = skipped = 0
-    for path in sorted(folder.iterdir()):
+    if approve:
+        added += _approve_review(manifest, case_dir, dry_run)
+
+    folder = case_dir / "media" / "manual"
+    if not folder.is_dir():
+        if not approve:
+            raise SystemExit(f"nothing to add: {folder} does not exist")
+        folder = None
+    for path in sorted(folder.iterdir()) if folder else []:
         if path.suffix.lower() not in EXTENSIONS:
             continue
         parsed = NAME.match(path.stem)
@@ -82,9 +126,10 @@ def main():
             skipped += 1
             continue
         item["local_paths"].insert(_insert_at(item["local_paths"], q_index), str(path))
-        if item.get("status") not in APPROVED:
+        was = item.get("status")
+        if was not in APPROVED:
             item["status"] = "resolved"
-            print(f"  + {path.name}  (scene status was '{item.get('status')}', now resolved)")
+            print(f"  + {path.name}  (scene status was '{was}', now resolved)")
         else:
             print(f"  + {path.name}")
         added += 1
