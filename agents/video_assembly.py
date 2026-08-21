@@ -110,6 +110,57 @@ def _run_ffmpeg(args: list, timeout: int = 300) -> None:
         raise RuntimeError(f"ffmpeg failed: {result.stderr[-2000:]}")
 
 
+PERPETRATOR_ROLES = {"suspect", "perpetrator", "killer", "offender", "murderer"}
+OPENING_OVERRIDE = "opening"
+
+
+def _perpetrator_frame(case_id: str, manifest: dict) -> str | None:
+    """The photograph every part opens on.
+
+    A viewer scrolling past decides in the first second whether this is a
+    case they know, and the face is what tells them. Left to itself the
+    opening frame is whatever the script's first visual beat happened to be
+    -- a village, a road -- which identifies nothing.
+
+    media/manual/opening.* wins if present, so the choice can be made by
+    hand. Otherwise the brief names the perpetrator and the manifest is
+    searched for a frame that was sourced for them."""
+    manual = _case_dir(case_id) / "media" / "manual"
+    if manual.is_dir():
+        for path in sorted(manual.iterdir()):
+            if path.stem.lower() == OPENING_OVERRIDE:
+                return str(path)
+
+    brief_path = _case_dir(case_id) / "brief.json"
+    if not brief_path.exists():
+        return None
+    brief = json.loads(brief_path.read_text(encoding="utf-8"))
+    names = [p.get("name", "") for p in (brief.get("key_people") or [])
+             if (p.get("role") or "").lower() in PERPETRATOR_ROLES]
+    if not names:
+        return None
+
+    # Match on surname: briefs give the full formal name while a visual query
+    # often carries a shorter form of it.
+    keys = {n.split()[-1].lower() for n in names if n.split()}
+    for item in manifest["items"]:
+        for q_index, meta in enumerate(item.get("queries") or []):
+            if not any(k in (meta.get("query") or "").lower() for k in keys):
+                continue
+            marker = f"_q{q_index}"
+            for path in item.get("local_paths") or []:
+                # Real photographs only. A person query that found nothing
+                # falls back to an AI rendering of the setting -- a street, a
+                # doorway -- so an ai_generated frame filed under the
+                # perpetrator's query is not a picture of him, and opening on
+                # it would promise a face and show a road.
+                if "ai_generated" in Path(path).parts or "ai_generated" in str(path):
+                    continue
+                if marker in Path(path).name and Path(path).is_file():
+                    return path
+    return None
+
+
 def _index_media(manifest: dict) -> dict:
     return {(i["part_number"], i["scene_index"]): i for i in manifest["items"]}
 
@@ -549,6 +600,14 @@ def run(case_id: str, db) -> None:
     work_dir = _ascii_work_dir(case_id)
     video_dir = _video_dir(case_id)
     clips = _load_clips(case_id)
+    opening_frame = _perpetrator_frame(case_id, media)
+    if opening_frame:
+        print(f"  opening every part on: {Path(opening_frame).name}")
+    else:
+        # Stated rather than passed over: the rule is that a part opens on the
+        # perpetrator, so failing to find one is a result, not a non-event.
+        print("  warning: no photograph of the perpetrator found -- parts will open "
+              "on their first scripted visual instead. Put one in media/manual/opening.jpg")
     if clips:
         print(f"  {len(clips)} animated clip(s) available -- those shots will move")
 
@@ -590,6 +649,16 @@ def run(case_id: str, db) -> None:
                 # photo shown rather than cutting to a blank/empty frame.
                 image_paths = last_good_images
                 placeholder_count += 1
+
+            # Every part opens on the perpetrator. The frame is copied under a
+            # _q0 name so it joins the first query's group -- the grouping
+            # reads the query index out of the filename, so the original name
+            # would file it under whichever query it was sourced for.
+            if scene_index == 0 and opening_frame and image_paths:
+                opener = work_dir / f"part{part_number}_scene0_q0_open{Path(opening_frame).suffix}"
+                if not opener.exists():
+                    shutil.copy2(opening_frame, opener)
+                image_paths = [str(opener)] + [p for p in image_paths if p != str(opener)]
 
             title_overlay = (part_number, part["hook"]) if scene_index == 0 else None
             # Pad silence before the very first scene of each part so the

@@ -691,6 +691,19 @@ def _search_all(query: str, known_people: set | None = None) -> list[dict]:
 MANUAL_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 
 
+def _people_only() -> bool:
+    """PIPELINE_PEOPLE_ONLY=1 resolves the named-person queries and stops.
+
+    Finding a person costs a web search; drawing everything else costs hours
+    on the GPU. Running them together means you only learn which victim,
+    detective or suspect has no photo after the expensive half has already
+    finished -- and supplying it afterwards means doing that half again. This
+    splits the pass so the gaps are known while they are still cheap to fill.
+    """
+    import os
+    return os.environ.get("PIPELINE_PEOPLE_ONLY", "") == "1"
+
+
 def _manual_frames(case_id: str, tag: str) -> list:
     """Photos dropped in by hand for this exact query, newest naming wins.
 
@@ -905,6 +918,8 @@ def _parts_limit(parts):
 
 def run(case_id: str, db) -> None:
     script = _load_script(case_id)
+    people_only = _people_only()
+    missing_people = []
 
     # Every rerun writes a brand-new media_manifest.json from scratch, but
     # without this, files from earlier runs (different scene counts/queries
@@ -913,9 +928,13 @@ def run(case_id: str, db) -> None:
     # visible and confusing when browsing the folder directly.
     # "manual" is deliberately absent: it holds photos a person sourced by
     # hand, and wiping those on every rerun would throw away the only work
-    # here that cannot be redone automatically.
-    for subfolder in ("accepted", "review", "ai_generated"):
-        shutil.rmtree(_media_dir(case_id, subfolder), ignore_errors=True)
+    # here that cannot be redone automatically. The planning pass wipes
+    # nothing at all -- it is allowed to run against a finished case, and
+    # deleting hours of generated frames to answer a question would be a
+    # cruel way to find that out.
+    if not people_only:
+        for subfolder in ("accepted", "review", "ai_generated"):
+            shutil.rmtree(_media_dir(case_id, subfolder), ignore_errors=True)
 
     brief_path = _case_dir(case_id) / "brief.json"
     known_people = set()
@@ -998,6 +1017,8 @@ def run(case_id: str, db) -> None:
 
             fallbacks = scene.get("visual_fallbacks") or []
             for q_index, query in enumerate(queries):
+                if people_only and not _looks_like_person_name(query, known_people):
+                    continue
                 print(f"  [p{part_number}s{scene_index} q{q_index}/{len(queries)}] {query[:50]}", flush=True)
                 r = _resolve_query(case_id, part_number, scene_index, q_index, query,
                                    known_people, frames_per_query[q_index],
@@ -1018,6 +1039,16 @@ def run(case_id: str, db) -> None:
                 item["review_frames"].extend(r["review_frames"])
                 if r["status"] == "manual_person":
                     item["manual_people"].append(query)
+                    # Recorded with the filename that would answer it, so the
+                    # queue is a to-do list rather than a diagnosis.
+                    missing_people.append({
+                        "person": query,
+                        "part_number": part_number,
+                        "scene_index": scene_index,
+                        "query_index": q_index,
+                        "supply_as": f"media/manual/part{part_number}_scene{scene_index}_q{q_index}.jpg",
+                        "scene_text": (scene.get("text") or "")[:160],
+                    })
 
             total_frames += len(item["local_paths"])
             if item["local_paths"]:
@@ -1032,6 +1063,27 @@ def run(case_id: str, db) -> None:
                 manual_scene_count += 1
 
             items.append(item)
+
+    if people_only:
+        needed_path = _case_dir(case_id) / "people_needed.json"
+        needed_path.write_text(json.dumps(missing_people, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+        staged = sum(len(i["review_frames"]) for i in items)
+        print()
+        print(f"  PLANNING PASS -- nothing generated, no manifest touched")
+        if missing_people:
+            print(f"  {len(missing_people)} person(s) have no public-domain photo. "
+                  f"Drop a file for each into the case folder, then run the archive "
+                  f"stage normally:")
+            for entry in missing_people:
+                print(f"    {entry['supply_as']:<44} {entry['person']}")
+        else:
+            print("  every named person resolved -- nothing to supply by hand")
+        if staged:
+            print(f"  {staged} mugshot(s) staged in media/review -- approve with "
+                  f"tools/add_manual_media.py {case_id} --approve-review")
+        print(f"  written: {needed_path}")
+        return
 
     manifest = {"case_id": script.get("case_id", case_id), "items": items}
     manifest_path = _case_dir(case_id) / "media_manifest.json"
