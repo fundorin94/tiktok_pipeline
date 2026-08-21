@@ -773,7 +773,11 @@ def _people_only() -> bool:
     return os.environ.get("PIPELINE_PEOPLE_ONLY", "") == "1"
 
 
-def _manual_frames(case_id: str, tag: str) -> list:
+def _normalise_subject(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+
+
+def _manual_frames(case_id: str, tag: str, query: str = "") -> list:
     """Photos dropped in by hand for this exact query, newest naming wins.
 
     Files live in media/manual/ and are named after the query they answer:
@@ -785,14 +789,24 @@ def _manual_frames(case_id: str, tag: str) -> list:
     folder = _case_dir(case_id) / "media" / "manual"
     if not folder.is_dir():
         return []
-    found = []
+    found, by_subject = [], []
+    wanted = _normalise_subject(query)
     for path in sorted(folder.iterdir()):
         if path.suffix.lower() not in MANUAL_EXTENSIONS:
             continue
         stem = path.stem
         if stem == tag or (stem.startswith(tag + "_") and stem[len(tag) + 1:].isdigit()):
             found.append(str(path))
-    return found
+            continue
+        # A file named after its subject answers that subject wherever it comes
+        # up: "David Faraday.jpg" covers all four scenes that ask for him.
+        # Supplying the same face four times under four scene numbers is work
+        # nobody should be asked to do. Slot-named files still win, so one
+        # scene can be given a different portrait deliberately.
+        subject = _normalise_subject(stem)
+        if len(subject) >= 6 and wanted and subject in wanted:
+            by_subject.append(str(path))
+    return found or by_subject
 
 
 def _resolve_query(case_id, part_number, scene_index, q_index, query, known_people,
@@ -814,7 +828,7 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
     # A hand-supplied photo beats everything: it was chosen by a person who
     # looked at it, which no search or generator here can claim. Checked
     # before the search so it also costs nothing.
-    manual = _manual_frames(case_id, tag)
+    manual = _manual_frames(case_id, tag, query)
     if manual:
         print(f"    using {len(manual)} hand-supplied frame(s)", flush=True)
         return {"query": query, "kind": "manual", "status": "found",
