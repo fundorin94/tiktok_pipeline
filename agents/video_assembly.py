@@ -135,6 +135,20 @@ def _perpetrator_frame(case_id: str, manifest: dict) -> str | None:
     if not brief_path.exists():
         return None
     brief = json.loads(brief_path.read_text(encoding="utf-8"))
+
+    # An unsolved case has no perpetrator to open on -- it has SUSPECTS, and
+    # putting one of their faces at the head of six videos states as fact the
+    # thing the case never established. The Zodiac brief lists two men, both
+    # named, neither charged, both dead and unable to answer it. So when the
+    # story stage raises its sensitivity flag, no face is chosen automatically.
+    # media/manual/opening.* still works: a deliberate human choice is a
+    # different act from a filename match, and it is checked before this.
+    sensitivity = brief.get("sensitivity")
+    if isinstance(sensitivity, dict) and sensitivity.get("flag"):
+        print("  case is flagged sensitive (unsolved / no conviction) -- not opening "
+              "on a suspect's photograph. Put a chosen image in media/manual/opening.jpg")
+        return None
+
     names = [p.get("name", "") for p in (brief.get("key_people") or [])
              if (p.get("role") or "").lower() in PERPETRATOR_ROLES]
     if not names:
