@@ -187,6 +187,31 @@ _PEOPLE_WORDS = re.compile(
     r"custody|arrested|waiting|walking|standing)\b", re.I)
 
 
+_DOCUMENT_WORDS = re.compile(
+    r"\b(cipher|cryptogram|cryptograph\w*|decoded|decryption|"
+    r"letter|letters|note|notes|message|handwrit\w*|signature|"
+    r"telegram|postcard|manuscript|transcript|document|"
+    r"headline|newspaper page|front page|typed|typewritten|"
+    r"page of|pages of|written on paper|text)\b", re.I)
+
+
+def _is_document(query: str) -> bool:
+    """Does this query ask for something with WRITING on it?
+
+    Image models cannot spell, so a generated cipher is convincing-looking
+    nonsense and a generated letter is a forged historical document -- the
+    Zodiac script asks for both by name, including the actual decoded
+    sentences. Until the gate split those frames were rejected outright for
+    dominant lettering; now that lettering is only a soft preference, they
+    would sail through and ship. So writing is treated like a named person
+    instead: found in a real archive, supplied by hand, or not shown.
+
+    Shapes are not writing. The crossed-circle symbol is a circle and two
+    strokes, which the model draws perfectly well, so "symbol" alone does
+    not land here."""
+    return bool(_DOCUMENT_WORDS.search(query))
+
+
 def _wants_people(query: str) -> bool:
     """Does this query describe a scene with people in it?
 
@@ -740,6 +765,7 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
     - review_frames: mugshot frames staged for manual review (NOT auto-played)
     """
     tag = f"part{part_number}_scene{scene_index}_q{q_index}"
+    people_only_mode = _people_only()
 
     # A hand-supplied photo beats everything: it was chosen by a person who
     # looked at it, which no search or generator here can claim. Checked
@@ -847,6 +873,14 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
         return verdict
 
     def generate(prompt: str, wanted: int, start_index: int = 0):
+        # The planning pass draws nothing at all. Not even the fallback that
+        # stands in for a person with no photo: rendering a substitute is the
+        # expensive half, and the whole point of the pass is to report the
+        # gap while it is still cheap to fill by hand. Without this the pass
+        # quietly ran SDXL for every missing face -- which is what it exists
+        # to avoid.
+        if people_only_mode:
+            return
         # Decided from the query text before the era is appended -- the era is
         # a bare year and carries no hint of who is in the shot.
         people = _wants_people(prompt)
@@ -876,6 +910,18 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
         else:
             result["status"] = "manual_person"
             result["note"] = "no public-domain photo found -- manual sourcing (no AI faces)"
+        return result
+
+    if _is_document(query):
+        # Same contract as a named person: a real one or none. Generating it
+        # would produce plausible-looking gibberish, and for the decoded
+        # Zodiac sentences the script quotes verbatim, a forged document.
+        if frames:
+            result["status"] = "found"
+            result["frames"] = frames
+            return result
+        result["status"] = "manual_document"
+        result["note"] = "writing cannot be generated -- needs the real document"
         return result
 
     # Object/location: fill the query's share of the scene's ~3s slots with
@@ -1017,7 +1063,8 @@ def run(case_id: str, db) -> None:
 
             fallbacks = scene.get("visual_fallbacks") or []
             for q_index, query in enumerate(queries):
-                if people_only and not _looks_like_person_name(query, known_people):
+                if people_only and not (_looks_like_person_name(query, known_people)
+                                       or _is_document(query)):
                     continue
                 print(f"  [p{part_number}s{scene_index} q{q_index}/{len(queries)}] {query[:50]}", flush=True)
                 r = _resolve_query(case_id, part_number, scene_index, q_index, query,
@@ -1037,11 +1084,12 @@ def run(case_id: str, db) -> None:
                     else:
                         print(f"    dropped a frame that is no longer on disk: {Path(frame).name}", flush=True)
                 item["review_frames"].extend(r["review_frames"])
-                if r["status"] == "manual_person":
+                if r["status"] in ("manual_person", "manual_document"):
                     item["manual_people"].append(query)
                     # Recorded with the filename that would answer it, so the
                     # queue is a to-do list rather than a diagnosis.
                     missing_people.append({
+                        "kind": "document" if r["status"] == "manual_document" else "person",
                         "person": query,
                         "part_number": part_number,
                         "scene_index": scene_index,
@@ -1065,18 +1113,20 @@ def run(case_id: str, db) -> None:
             items.append(item)
 
     if people_only:
-        needed_path = _case_dir(case_id) / "people_needed.json"
+        needed_path = _case_dir(case_id) / "manual_needed.json"
         needed_path.write_text(json.dumps(missing_people, ensure_ascii=False, indent=2),
                                encoding="utf-8")
         staged = sum(len(i["review_frames"]) for i in items)
         print()
         print(f"  PLANNING PASS -- nothing generated, no manifest touched")
         if missing_people:
-            print(f"  {len(missing_people)} person(s) have no public-domain photo. "
-                  f"Drop a file for each into the case folder, then run the archive "
-                  f"stage normally:")
+            people = sum(1 for e in missing_people if e["kind"] == "person")
+            docs = len(missing_people) - people
+            print(f"  {len(missing_people)} item(s) need a real image "
+                  f"({people} person(s), {docs} document(s)). Drop a file for each into "
+                  f"the case folder, then run the archive stage normally:")
             for entry in missing_people:
-                print(f"    {entry['supply_as']:<44} {entry['person']}")
+                print(f"    [{entry['kind'][:3]}] {entry['supply_as']:<42} {entry['person']}")
         else:
             print("  every named person resolved -- nothing to supply by hand")
         if staged:
