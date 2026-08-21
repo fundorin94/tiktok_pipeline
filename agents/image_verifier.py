@@ -77,6 +77,14 @@ person -- only reject if it clearly isn't a photo of a person at all.
 
 Answer with a JSON object only."""
 
+DOCUMENT_SYSTEM_PROMPT = """You check whether a scanned document, letter, cipher, poster or newspaper page actually shows what it is supposed to, before it is used in a true-crime documentary video.
+
+Do NOT require a photograph here. The subject IS a document: a page of handwriting, a grid of symbols, a printed poster, a police composite drawing, a newspaper column. Being a scan, a drawing or a diagram is exactly right and must never be a reason to reject it -- that rule exists to keep paintings out of photographic scenes, and does not apply to paperwork.
+
+Reject it (matches=false) only when the document is the wrong one: a different case entirely, a modern reproduction or fan artwork rather than the historical item, an unrelated form, or a page whose subject has nothing to do with the description.
+
+Answer with a JSON object only."""
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -117,7 +125,15 @@ Answer period_ok=false only if an object that plainly could not exist in the sta
 Put the reason for whichever verdict is false in `reason`, most serious first.
 Answer with a JSON object only."""
 
-AI_SAFETY_SCHEMA = {
+AI_SAFETY_DOCUMENT_SYSTEM_PROMPT = """You check whether a scanned document, letter, cipher, poster or newspaper page actually shows what it is supposed to, before it is used in a true-crime documentary video.
+
+Do NOT require a photograph here. The subject IS a document: a page of handwriting, a grid of symbols, a printed poster, a police composite drawing, a newspaper column. Being a scan, a drawing or a diagram is exactly right and must never be a reason to reject it -- that rule exists to keep paintings out of photographic scenes, and does not apply to paperwork.
+
+Reject it (matches=false) only when the document is the wrong one: a different case entirely, a modern reproduction or fan artwork rather than the historical item, an unrelated form, or a page whose subject has nothing to do with the description.
+
+Answer with a JSON object only."""
+
+SCHEMA = {
     "type": "object",
     "properties": {
         "safe": {"type": "boolean"},
@@ -266,7 +282,8 @@ def _ask_safety(client, data: str, media_type: str, question: str,
                 "reason": f"safety check failed: {exc}"}, None
 
 
-def verify_image(image_path: str, description: str, is_person: bool = False):
+def verify_image(image_path: str, description: str, is_person: bool = False,
+                 is_document: bool = False):
     """Returns (matches: bool, reason: str, usage) -- usage is None on failure.
     Fails open (treats the image as a match) if the API call itself errors,
     so a transient API issue doesn't block the whole archive stage; it only
@@ -276,11 +293,16 @@ def verify_image(image_path: str, description: str, is_person: bool = False):
 
     path = Path(image_path)
 
-    system_prompt = PERSON_SYSTEM_PROMPT if is_person else SYSTEM_PROMPT
-    question = (
-        f"Is this a photograph of a person (identity already confirmed by filename: {description})?"
-        if is_person else f"Does this image actually show: {description}"
-    )
+    if is_document:
+        system_prompt = DOCUMENT_SYSTEM_PROMPT
+        question = f"Is this the document described: {description}"
+    elif is_person:
+        system_prompt = PERSON_SYSTEM_PROMPT
+        question = (f"Is this a photograph of a person (identity already confirmed "
+                    f"by filename: {description})?")
+    else:
+        system_prompt = SYSTEM_PROMPT
+        question = f"Does this image actually show: {description}"
 
     try:
         b64, media_type = _encode_downscaled(path)

@@ -195,6 +195,50 @@ _DOCUMENT_WORDS = re.compile(
     r"page of|pages of|written on paper|text)\b", re.I)
 
 
+# Ordered by how much the word narrows an archive search, not by where it
+# happens to sit in the query. "408-symbol cipher" contains both "symbol"
+# and "cipher"; the leftmost match is "symbol", which is the vaguer of the
+# two and pulls back astrological clip art instead of the 1969 cryptogram.
+_RETRIEVAL_NOUNS = [
+    "cipher", "cryptogram", "wanted poster", "bomb diagram", "composite sketch",
+    "mugshot", "postcard", "letter", "sketch", "poster", "card", "diagram",
+    "handwriting", "signature", "headline", "newspaper", "crime scene",
+    "message", "note", "symbol",
+]
+
+
+def _case_subject(brief: dict) -> str:
+    """Short name of the case, for use as a search anchor: "Zodiac Killer",
+    "Andrei Chikatilo". Titles read "The Zodiac Killer: Northern California's
+    Unsolved Serial Killer", so everything after the colon is description."""
+    title = (brief.get("title") or "").split(":")[0].strip()
+    if title.lower().startswith("the "):
+        title = title[4:]
+    return title
+
+
+def _retrieval_query(query: str, subject: str):
+    """A short term an archive can actually match, or None.
+
+    Visual queries are written for the image model -- the script prompt asks
+    for an art-directed shot, "not a category" -- and the same prose is then
+    handed to a keyword search, where it matches nothing. Measured on Zodiac:
+    "408-symbol cipher handwritten on paper" returns 0 candidates, while
+    "Zodiac cipher" returns 3, and Wikimedia holds the real 1969 ciphers,
+    letters and wanted poster under public domain the whole time. Both cases
+    before this concluded the archive was empty when it was being asked the
+    wrong question."""
+    if not subject:
+        return None
+    lowered = query.lower()
+    noun = next((n for n in _RETRIEVAL_NOUNS
+                 if re.search(r"\b" + re.escape(n) + r"\b", lowered)), None)
+    if not noun:
+        return None
+    term = f"{subject} {noun}"
+    return None if term.lower() == query.strip().lower() else term
+
+
 def _is_document(query: str) -> bool:
     """Does this query ask for something with WRITING on it?
 
@@ -510,13 +554,13 @@ def _extension_for(url: str) -> str:
     return match.group(1).lower() if match else "jpg"
 
 
-def _verify(path: Path, query: str, is_person: bool = False):
+def _verify(path: Path, query: str, is_person: bool = False, is_document: bool = False):
     """Vision check that a downloaded candidate actually depicts the query
     subject -- catches keyword-coincidence false positives (a "crowbar"
     electronics diagram, a "Beetle" insect stamp) that text matching alone
     can't. Returns (matches, reason, usage)."""
     from agents.image_verifier import verify_image
-    return verify_image(str(path), query, is_person=is_person)
+    return verify_image(str(path), query, is_person=is_person, is_document=is_document)
 
 
 def _name_tokens(query: str) -> list[str]:
@@ -753,7 +797,7 @@ def _manual_frames(case_id: str, tag: str) -> list:
 
 def _resolve_query(case_id, part_number, scene_index, q_index, query, known_people,
                    frames_wanted, next_index_for_query, db, fallback_query: str = "",
-                   era: str = ""):
+                   era: str = "", subject: str = ""):
     """Resolve a single visual_query within a scene. Returns a dict:
       {query, kind, status, frames, review_frames, note}
     - kind: "person" | "object_or_location"
@@ -779,6 +823,15 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
 
     is_person = _looks_like_person_name(query, known_people)
     candidates = _search_all(query, known_people)
+    if not candidates:
+        # The query was written for the image model, so an archive keyword
+        # search reads it as noise. Ask again in the terms an archive indexes
+        # by before concluding the material does not exist.
+        retry = _retrieval_query(query, subject)
+        if retry:
+            candidates = _search_all(retry, known_people)
+            if candidates:
+                print(f"    archive found {len(candidates)} via {retry!r}", flush=True)
 
     result = {"query": query, "kind": "person" if is_person else "object_or_location",
               "status": "unresolved", "frames": [], "review_frames": [], "note": ""}
@@ -843,7 +896,8 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
             dest_path = _media_dir(case_id, "accepted") / f"{tag}_{len(frames)}.{ext}"
             if not _download(cand["url"], dest_path):
                 continue
-            matches, _reason, usage = _verify(dest_path, query, is_person=is_person)
+            matches, _reason, usage = _verify(dest_path, query, is_person=is_person,
+                                              is_document=_is_document(query))
             if usage:
                 db.log_usage(case_id, "archive_verify", IMAGE_VERIFY_MODEL, usage.input_tokens, usage.output_tokens)
             if not matches:
@@ -984,11 +1038,17 @@ def run(case_id: str, db) -> None:
 
     brief_path = _case_dir(case_id) / "brief.json"
     known_people = set()
+    # Defined before the brief is read: both are used unconditionally further
+    # down, so a case without a brief raised NameError instead of simply
+    # running without era or subject hints.
+    case_era = ""
+    case_subject = ""
     _WIKI_IMAGE_POOL.clear()
     if brief_path.exists():
         brief = json.loads(brief_path.read_text(encoding="utf-8"))
         known_people = {p["name"] for p in brief.get("key_people", [])}
         case_era = _case_era(brief)
+        case_subject = _case_subject(brief)
         if case_era:
             print(f"  case era: {case_era} (added to generated scenes that don't state one)", flush=True)
 
@@ -1071,7 +1131,7 @@ def run(case_id: str, db) -> None:
                                    known_people, frames_per_query[q_index],
                                    next_index_for_query, db,
                                    fallback_query=fallbacks[q_index] if q_index < len(fallbacks) else "",
-                                   era=case_era)
+                                   era=case_era, subject=case_subject)
                 item["queries"].append({k: r[k] for k in ("query", "kind", "status", "note")})
                 # Only record frames that are actually on disk. A rejected
                 # re-roll unlinks its file, and when that file's path was
