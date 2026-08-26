@@ -97,30 +97,40 @@ def _detect(image_path: str):
         ascii_tmp.unlink(missing_ok=True)
 
 
-def _is_unsafe(image_path: str, people_allowed: bool = False) -> bool:
-    """Local detectors, run before the vision model because they are free.
+def _unsafe_reason(image_path: str, people_allowed: bool = False) -> str:
+    """Why this frame is rejected, or "" if it is fine.
 
-    A visible FACE is always fatal, in both modes. That veto is the whole
-    safety net once figures are allowed: a "from behind" prompt still turns
-    a head, catches a profile, puts a face in a mirror or stands a bystander
-    facing camera in the background, and YuNet is what catches it.
-
-    What differs is the body. With people_allowed=False the frame is meant to
-    be empty, so ANY NudeNet body-part hit (belly, feet, armpits -- covered or
-    not) means the model drew a person that does not belong there. With
-    people_allowed=True a back, a shoulder or a pair of legs is the point of
-    the shot, so only actual exposed nudity is fatal."""
-    if _face_count(image_path) > 0:
-        return True
+    Returns the reason rather than a bare bool because these two detectors
+    were the pipeline's only silent rejecter. The vision gate announces every
+    verdict it makes; these dropped frames without a word, so a run where 112
+    of 198 queries produced nothing looked like the model simply failing,
+    with no way to tell an actual person from a false positive on a hand.
+    """
+    faces = _face_count(image_path)
+    if faces >= 99:
+        return "face detector could not read the file"
+    if faces > 0:
+        return f"{faces} face(s) detected"
     detections = _detect(image_path)
     if detections is None:
-        return True  # detector failed -> fail safe, drop the frame
+        return "body-part detector failed to run"
     if people_allowed:
-        return any(d.get("class") in _NUDE_EXPOSED_LABELS
-                   and d.get("score", 0) >= _NUDE_SCORE_THRESHOLD
-                   for d in detections)
-    # every NudeNet label is a human body part -> any hit means a person
-    return any(x.get("score", 0) >= _PERSON_PART_THRESHOLD for x in detections)
+        nude = [d for d in detections
+                if d.get("class") in _NUDE_EXPOSED_LABELS
+                and d.get("score", 0) >= _NUDE_SCORE_THRESHOLD]
+        if nude:
+            top = max(nude, key=lambda d: d.get("score", 0))
+            return f"nudity: {top.get('class')} {top.get('score', 0):.2f}"
+        return ""
+    parts = [d for d in detections if d.get("score", 0) >= _PERSON_PART_THRESHOLD]
+    if parts:
+        top = max(parts, key=lambda d: d.get("score", 0))
+        return f"body part: {top.get('class')} {top.get('score', 0):.2f}"
+    return ""
+
+
+def _is_unsafe(image_path: str, people_allowed: bool = False) -> bool:
+    return bool(_unsafe_reason(image_path, people_allowed))
 
 
 def _is_nude(image_path: str) -> bool:
@@ -379,7 +389,9 @@ def generate_image(visual_query: str, dest_path: Path, variant: int = 0,
             # face (AI should render only objects/places -- a face means it
             # wrongly drew a person). Re-roll on a new seed; drop the frame
             # entirely if it keeps producing people.
-            if _is_unsafe(str(dest_path), people_allowed=people):
+            local_reason = _unsafe_reason(str(dest_path), people_allowed=people)
+            if local_reason:
+                print(f"    local detector rejected a frame: {local_reason}", flush=True)
                 dest_path.unlink(missing_ok=True)
                 continue
             # Third, outermost gate: a vision model looks at the frame and
@@ -411,5 +423,12 @@ def generate_image(visual_query: str, dest_path: Path, variant: int = 0,
         return False
     except Exception as exc:
         spare.unlink(missing_ok=True)
+        # A gate that cannot run is not a bad frame -- it means nothing after
+        # this point is checked, so it has to reach the top and stop the
+        # stage. Swallowing it here turned a broken safety check into a run
+        # that took 17 hours to produce a video with 112 empty queries.
+        from agents.image_verifier import SafetyCheckUnavailable
+        if isinstance(exc, SafetyCheckUnavailable):
+            raise
         print(f"    AI generation failed for {visual_query!r}: {exc}")
         return False

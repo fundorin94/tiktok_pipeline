@@ -163,6 +163,19 @@ def _safety_prompt(people_allowed: bool) -> str:
     )
 
 
+AI_SAFETY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "safe": {"type": "boolean"},
+        "period_ok": {"type": "boolean"},
+        "text_ok": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["safe", "period_ok", "text_ok", "reason"],
+    "additionalProperties": False,
+}
+
+
 class SafetyCheckUnavailable(RuntimeError):
     """The safety gate could not run (no API credit, auth failure, outage).
     Raised instead of returning "unsafe" so the stage stops with a clear
