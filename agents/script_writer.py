@@ -33,6 +33,7 @@ cut or compress secondary details, minor timeline entries, and less pivotal peop
 trying to include everything. Do not pad a thin case with filler to reach 6 parts, and do not \
 rush a rich case by cramming -- compress by choosing what matters, not by writing faster or \
 skipping the word-count target.
+- OPEN ON THE REASON TO WATCH. Every part's FIRST scene begins with a cold open of one or two sentences that states what is unresolved and asks it out loud, and only then starts the narrative. A viewer meets this video in a feed with a thumb already moving; a video that opens "Andrei Chikatilo was born in 1936 in a Ukrainian village" has answered nothing they wanted to know. Open instead on the thing that makes the case worth the next three minutes: "The Zodiac killed at least five people and was never caught. Sixty years on, nobody knows who he was. How?" -- then begin. For part 1 the question is the case's; for later parts it is that part's own. The question must be one the brief can actually answer and the part actually addresses -- never a vague tease ("what happened next will shock you"), never a claim the case does not support, and never a question the part leaves untouched.
 - Every part except possibly the last must end on a genuine cliffhanger or unresolved \
 question that makes the viewer want the next part -- an actual narrative beat (a discovery \
 about to be made, a suspect about to be confronted), not a cheap "but that's not all" filler \
@@ -443,6 +444,21 @@ def _forbidden_query(scene: dict):
     return [q for q in (scene.get("visual_queries") or []) if _FORBIDDEN_SUBJECTS.search(q)]
 
 
+def _missing_opening_hook(scene: dict) -> bool:
+    """True when a part's first scene walks straight into the chronology.
+
+    Only checks that the opening actually asks something -- whether the
+    question is a good one is not mechanical, and this is deliberately the
+    weak version of the rule. It catches the failure that kept happening:
+    part 1 of Zodiac opened on a road in 1968, which tells a scrolling
+    viewer nothing about why the case is worth their next three minutes."""
+    # First 45 words, not first two sentences: the hook is "one or two
+    # sentences, then the question", so the question itself is often the
+    # third. The narrow version failed its own worked example from the prompt.
+    opening = " ".join((scene.get("text") or "").split()[:45])
+    return "?" not in opening
+
+
 def _missing_person_query(scene: dict, known_names: list) -> bool:
     """True when the narration names a known person (victim, perpetrator,
     witness) but no visual query asks for that person -- every named person
@@ -629,11 +645,12 @@ def _repair_scenes_once(client, db, case_id: str, script: dict, known_names: lis
             repeats = overused and any(
                 any(w.strip(",.").lower() in overused for w in q.split())
                 for q in (scene.get("visual_queries") or []))
+            no_hook = scene is part["scenes"][0] and _missing_opening_hook(scene)
             banned = _forbidden_query(scene)
             if banned:
                 print(f"  rejected forbidden visual(s): {'; '.join(q[:44] for q in banned)}")
             if (_scene_is_undercovered(scene) or _missing_person_query(scene, known_names)
-                    or repeats or banned):
+                    or repeats or banned or no_hook):
                 avoid = sorted(overused) if repeats else []
                 bad.append((part, scene, avoid))
     if not bad:
@@ -657,6 +674,11 @@ def _repair_scenes_once(client, db, case_id: str, script: dict, known_names: lis
         banned_here = _forbidden_query(s)
         if banned_here:
             entry["forbidden_queries_rewrite_these"] = banned_here
+        if _p["scenes"] and s is _p["scenes"][0] and _missing_opening_hook(s):
+            entry["needs_opening_hook"] = (
+                "This is a part's first scene and it starts straight into the chronology. "
+                "Open with one or two sentences naming what is unresolved and asking it "
+                "out loud, then begin the narrative.")
         payload.append(entry)
 
     # Repair in batches. A whole 6-part case needs far more scenes rewritten
