@@ -452,11 +452,119 @@ def _missing_opening_hook(scene: dict) -> bool:
     weak version of the rule. It catches the failure that kept happening:
     part 1 of Zodiac opened on a road in 1968, which tells a scrolling
     viewer nothing about why the case is worth their next three minutes."""
-    # First 45 words, not first two sentences: the hook is "one or two
-    # sentences, then the question", so the question itself is often the
-    # third. The narrow version failed its own worked example from the prompt.
-    opening = " ".join((scene.get("text") or "").split()[:45])
+    # Wide enough for the longest opening the rule permits. This window has
+    # been wrong twice: first two sentences, when the question is usually the
+    # third, then 45 words, when a three-sentence cold open runs past that and
+    # three parts were reported hookless while carrying a perfectly good hook.
+    # The check has to be at least as generous as the instruction it enforces.
+    opening = " ".join((scene.get("text") or "").split()[:70])
     return "?" not in opening
+
+
+OPENING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "openings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "part_number": {"type": "integer"},
+                    "opening": {"type": "string"},
+                },
+                "required": ["part_number", "opening"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["openings"],
+    "additionalProperties": False,
+}
+
+
+def _repair_openings(client, db, case_id: str, script: dict) -> int:
+    """Give each part a cold open, by prepending rather than rewriting.
+
+    The scene-repair loop cannot do this: it hands the model a scene's text
+    as INPUT and asks for visual queries back, so flagging a missing hook
+    there did nothing at all -- the first attempt at this rule shipped a
+    script whose six parts all still opened on a date.
+
+    Prepending keeps every existing anchor valid, since they stay verbatim
+    substrings of the longer text. Only the first anchor is re-pointed, at
+    the new opening words, so the rule that a scene's first anchor is where
+    its text starts holds -- and the part's opening frame plays under the
+    question, which is where it belongs."""
+    need = [p for p in script["parts"] if p["scenes"] and _missing_opening_hook(p["scenes"][0])]
+    if not need:
+        return 0
+
+    listing = "\n\n".join(
+        f'PART {p["part_number"]} (hook: {p.get("hook", "")})\n'
+        f'currently opens: {p["scenes"][0]["text"][:300]}'
+        for p in need
+    )
+    print(f"  writing a cold open for {len(need)} part(s)", flush=True)
+    response = client.messages.create(
+        model=SCRIPT_MODEL,
+        max_tokens=2000,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content":
+                   "Each of these parts starts straight into the chronology. Write the one to "
+                   "three sentences that should come BEFORE the existing text: name what is "
+                   "unresolved and ask it out loud, so a viewer scrolling past learns why the "
+                   "next minutes are worth it. End on the question. Use only facts the script "
+                   "already establishes -- no tease, no claim the case does not support. Return "
+                   "the new sentences only, not the existing text.\n\n" + listing}],
+        output_config={"format": {"type": "json_schema", "schema": OPENING_SCHEMA}},
+    )
+    db.log_usage(case_id, "script_openings", SCRIPT_MODEL,
+                 response.usage.input_tokens, response.usage.output_tokens)
+    blocks = [b.text for b in response.content if b.type == "text"]
+    if not blocks:
+        return 0
+
+    written = {o["part_number"]: o["opening"].strip() for o in json.loads(blocks[0])["openings"]}
+    fixed = 0
+    for part in need:
+        opening = written.get(part["part_number"], "")
+        if not opening or "?" not in opening:
+            continue
+        scene = part["scenes"][0]
+        scene["text"] = opening + " " + scene["text"].strip()
+        anchors = scene.get("visual_anchors")
+        if anchors:
+            # Sliced out of the finished text rather than rebuilt from the
+            # opening: joining split() words normalises whitespace, and an
+            # anchor that differs from the text by one space is no longer
+            # verbatim, which is the whole contract anchors have.
+            anchors[0] = " ".join(scene["text"].split()[:4])
+        fixed += 1
+    if fixed:
+        print(f"  cold open added to {fixed} part(s)", flush=True)
+    return fixed
+
+
+def _drop_unverbatim_anchors(script: dict) -> int:
+    """Clear anchors that do not appear in their scene's own text.
+
+    An anchor's only job is to say where in the narration its query belongs,
+    and the video assembly finds it by literal search. A paraphrased one --
+    "On August 4, the Examiner received" for text that reads "Three days
+    later, on August 4, the Examiner received" -- silently never matches, so
+    the scene falls back to spreading frames evenly and the cut drifts off
+    the words it was meant to land on. Better to drop the whole scene's
+    anchors and take the even walk deliberately than to keep a set that
+    looks authoritative and half works."""
+    cleared = 0
+    for part in script["parts"]:
+        for scene in part["scenes"]:
+            anchors = scene.get("visual_anchors") or []
+            text = scene.get("text") or ""
+            if anchors and any(a and a not in text for a in anchors):
+                scene["visual_anchors"] = []
+                cleared += 1
+    return cleared
 
 
 def _missing_person_query(scene: dict, known_names: list) -> bool:
@@ -792,6 +900,13 @@ def run(case_id: str, db) -> None:
     split = _split_long_scenes(script)
     if split:
         print(f"  {split} over-long scene(s) split into ~{MAX_SCENE_WORDS}-word scenes for tighter image timing")
+    # After splitting, so the cold open lands on whatever ends up being the
+    # part's actual first scene, and before lengths are annotated so the added
+    # words are counted.
+    _repair_openings(client, db, case_id, script)
+    stale = _drop_unverbatim_anchors(script)
+    if stale:
+        print(f'  {stale} scene(s) had anchors that are not verbatim in their text -- cleared')
     script = _annotate_lengths(script)
 
     out_path = _case_dir(case_id) / "script.json"
