@@ -806,7 +806,26 @@ def _manual_frames(case_id: str, tag: str, query: str = "") -> list:
         subject = _normalise_subject(stem)
         if len(subject) >= 6 and wanted and subject in wanted:
             by_subject.append(str(path))
+        elif _same_person(stem, query):
+            by_subject.append(str(path))
     return found or by_subject
+
+
+def _same_person(file_stem: str, query: str) -> bool:
+    """Do a filename and a query name the same person under different forms?
+
+    Substring matching alone is one-directional, and a regenerated script
+    drops middle names: "Michael Renault Mageau.jpg" stopped answering a
+    query that now reads "Michael Mageau", so four faces the user had
+    already supplied came back on the to-do list. Every word of the shorter
+    name must appear in the longer one, and at least two must line up, so a
+    file called "Paul.jpg" cannot attach itself to every Paul in the case."""
+    a = [w for w in re.findall(r"[A-Za-z]+", file_stem.lower()) if len(w) > 1]
+    b = [w for w in re.findall(r"[A-Za-z]+", query.lower()) if len(w) > 1]
+    if len(a) < 2 or len(b) < 2:
+        return False
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    return len(short) >= 2 and all(w in long_ for w in short)
 
 
 def _resolve_query(case_id, part_number, scene_index, q_index, query, known_people,
