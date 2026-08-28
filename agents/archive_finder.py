@@ -944,11 +944,13 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
     def vision_gate(path: str, people: bool = False) -> dict:
         try:
             verdict, usage = ai_frame_verdict(path, era=era, people_allowed=people)
-        except SafetyCheckUnavailable as exc:
-            raise RuntimeError(
-                "AI frame safety check is unavailable, so generated frames cannot be "
-                f"cleared for use -- stopping instead of shipping unchecked images.\n  cause: {exc}"
-            ) from exc
+        except SafetyCheckUnavailable:
+            # Deliberately NOT wrapped in a plain RuntimeError. generate_image
+            # catches broad exceptions so one bad frame cannot end a run, and
+            # a wrapped error is indistinguishable from that -- which is how
+            # an exhausted API key turned into 178 individually "failed"
+            # frames and an archive stage that reported success.
+            raise
         if usage:
             db.log_usage(case_id, "ai_frame_safety", IMAGE_VERIFY_MODEL,
                          usage.input_tokens, usage.output_tokens)
