@@ -939,27 +939,23 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
             frames.append(str(dest_path))
 
     from agents.image_generator import generate_image
-    from agents.image_verifier import SafetyCheckUnavailable, ai_frame_verdict
 
-    def vision_gate(path: str, people: bool = False) -> dict:
-        try:
-            verdict, usage = ai_frame_verdict(path, era=era, people_allowed=people)
-        except SafetyCheckUnavailable:
-            # Deliberately NOT wrapped in a plain RuntimeError. generate_image
-            # catches broad exceptions so one bad frame cannot end a run, and
-            # a wrapped error is indistinguishable from that -- which is how
-            # an exhausted API key turned into 178 individually "failed"
-            # frames and an archive stage that reported success.
-            raise
-        if usage:
-            db.log_usage(case_id, "ai_frame_safety", IMAGE_VERIFY_MODEL,
-                         usage.input_tokens, usage.output_tokens)
-        # Only the hard verdict is announced as a rejection. A soft flag is
-        # not a rejection -- generate_image decides whether a cleaner re-roll
-        # turns up, and says so itself if it settles for the flagged frame.
-        if not verdict["safe"]:
-            print(f"    vision gate rejected a frame: {verdict['reason'][:80]}", flush=True)
-        return verdict
+    # Generated frames are cleared locally now: YuNet for faces, NudeNet for
+    # bodies, both free and both already running before the vision model was
+    # ever consulted. The remote gate is gone from this path entirely.
+    #
+    # What that costs is real and worth stating. The vision model was added
+    # because the local pair once missed a body shot from above on grainy
+    # black and white, and it also judged period and lettering, which nothing
+    # local replaces. Lettering is the lesser loss than it looks: the
+    # anti-text terms in NEGATIVE_PROMPT spent this whole time past CLIP's
+    # 77-token cut and never reached the model, and now they do.
+    #
+    # The archive relevance check stays remote. It answers "is this actually
+    # the thing I searched for" -- the check that catches a crowbar circuit
+    # diagram arriving for "crowbar" -- which no local detector can do, and
+    # it runs per downloaded candidate rather than per generated frame, so it
+    # is a fraction of the calls.
 
     def generate(prompt: str, wanted: int, start_index: int = 0):
         # The planning pass draws nothing at all. Not even the fallback that
@@ -977,7 +973,7 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
         for ai_idx in range(start_index, wanted):
             dest_path = _media_dir(case_id, "ai_generated") / f"{tag}_ai{ai_idx}.png"
             if generate_image(prompt, dest_path, variant=ai_idx,
-                              vision_gate=vision_gate, people=people):
+                              vision_gate=None, people=people):
                 frames.append(str(dest_path))
 
     if is_person:
