@@ -119,11 +119,13 @@ def _get_yolo():
 def _person_count(image_path: str) -> int:
     """People in the frame, faces or not.
 
-    This is the check YuNet and NudeNet cannot make. A figure walking away
-    from camera has no face to find and, fully clothed, no body part NudeNet
-    scores -- so a frame of two men on a dune, one in a coat with his back
-    turned, passed both detectors as empty and shipped. YOLO finds them at
-    0.9 confidence.
+    This is the check YuNet and NudeNet cannot make: a clothed figure walking
+    away from camera has no face to find and no body part NudeNet scores.
+    YOLO reads one at 0.9 where both return nothing.
+
+    It has not yet caught a real leak here -- see the threshold note above.
+    Every frame that looked like one turned out to be either a figures-mode
+    query, where people are allowed, or a false positive.
 
     Returns a large sentinel on failure so the caller fails safe, matching
     _face_count."""
