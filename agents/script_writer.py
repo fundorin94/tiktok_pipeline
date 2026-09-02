@@ -600,6 +600,40 @@ def _repair_openings(client, db, case_id: str, script: dict, tokens: set | None 
     return fixed
 
 
+def _drop_narration_queries(script: dict) -> int:
+    """Remove visual queries that are sentences of narration, not subjects.
+
+    The scene-repair loop answers with visual queries, so telling it a scene
+    needed an opening hook once produced exactly that: the hook came back as
+    visual_queries[0], "The Zodiac killed at least five people and was never
+    caught. Sixty years later..." -- and the archive stage then went looking
+    for a photograph of a sentence. It also contained the word "people",
+    which put the query into figures mode.
+
+    That particular route is gone, but the repair loop can still answer with
+    prose, so the shape is checked rather than trusted. Sentence-ending
+    punctuation is the discriminator: real queries run long and descriptive
+    ("cluttered detective's desk with case files, full ashtray and a rotary
+    phone off the hook") but do not end sentences."""
+    dropped = 0
+    for part in script["parts"]:
+        for scene in part["scenes"]:
+            queries = scene.get("visual_queries") or []
+            keep = [i for i, q in enumerate(queries)
+                    if not (len(q.split()) > 10 and any(c in q for c in ".?!"))]
+            if len(keep) == len(queries):
+                continue
+            for q in (queries[i] for i in range(len(queries)) if i not in keep):
+                print(f"  dropped a narration sentence used as a visual query: {q[:60]}",
+                      flush=True)
+            dropped += len(queries) - len(keep)
+            for key in ("visual_queries", "visual_fallbacks", "visual_anchors"):
+                values = scene.get(key) or []
+                if len(values) == len(queries):
+                    scene[key] = [values[i] for i in keep]
+    return dropped
+
+
 def _drop_unverbatim_anchors(script: dict) -> int:
     """Clear anchors that do not appear in their scene's own text.
 
@@ -959,6 +993,9 @@ def run(case_id: str, db) -> None:
     # part's actual first scene, and before lengths are annotated so the added
     # words are counted.
     _repair_openings(client, db, case_id, script, _subject_tokens(brief))
+    prose = _drop_narration_queries(script)
+    if prose:
+        print(f'  {prose} narration sentence(s) removed from visual queries')
     stale = _drop_unverbatim_anchors(script)
     if stale:
         print(f'  {stale} scene(s) had anchors that are not verbatim in their text -- cleared')
