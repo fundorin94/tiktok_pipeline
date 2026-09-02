@@ -34,6 +34,12 @@ trying to include everything. Do not pad a thin case with filler to reach 6 part
 rush a rich case by cramming -- compress by choosing what matters, not by writing faster or \
 skipping the word-count target.
 - OPEN ON THE REASON TO WATCH. Every part's FIRST scene begins with a cold open of one or two sentences that states what is unresolved and asks it out loud, and only then starts the narrative. A viewer meets this video in a feed with a thumb already moving; a video that opens "Andrei Chikatilo was born in 1936 in a Ukrainian village" has answered nothing they wanted to know. Open instead on the thing that makes the case worth the next three minutes: "The Zodiac killed at least five people and was never caught. Sixty years on, nobody knows who he was. How?" -- then begin. For part 1 the question is the case's; for later parts it is that part's own. The question must be one the brief can actually answer and the part actually addresses -- never a vague tease ("what happened next will shock you"), never a claim the case does not support, and never a question the part leaves untouched.
+- NAME THE CASE IN THE FIRST SIX WORDS. The killer's name or the alias the public knows him by \
+must be spoken within roughly the first two seconds -- "The Zodiac killed at least five people", \
+not "Between 1968 and 1970, a gunman killed at least five people". A viewer scrolling decides \
+whether this is a case they care about before the second sentence, and cannot decide that about \
+an unnamed gunman. If the perpetrator was never identified, the alias is the name: Zodiac, the \
+Ripper, the Butcher. This applies to every part, not only the first.
 - Every part except possibly the last must end on a genuine cliffhanger or unresolved \
 question that makes the viewer want the next part -- an actual narrative beat (a discovery \
 about to be made, a suspect about to be confronted), not a cheap "but that's not all" filler \
@@ -482,7 +488,43 @@ OPENING_SCHEMA = {
 }
 
 
-def _repair_openings(client, db, case_id: str, script: dict) -> int:
+NAME_BY_WORD = 6  # ~2 seconds at the narrator's measured 2.79 words/second
+
+
+def _subject_tokens(brief: dict) -> set:
+    """Distinctive words that name this case: "Zodiac", "Chikatilo".
+
+    Generic ones are dropped, because "killer" appearing in the first six
+    words tells a viewer nothing about which case they have landed in."""
+    import re as _re
+    generic = {"the", "a", "an", "killer", "murders", "murder", "case",
+               "story", "of", "and", "unsolved", "serial"}
+    words = set()
+    title = (brief.get("title") or "").split(":")[0]
+    words.update(w.lower() for w in _re.findall(r"[A-Za-z]+", title))
+    for person in brief.get("key_people") or []:
+        if (person.get("role") or "").lower() in {"suspect", "perpetrator", "killer"}:
+            parts = _re.findall(r"[A-Za-z]+", person.get("name") or "")
+            if parts:
+                words.add(parts[-1].lower())
+    return {w for w in words if len(w) > 3 and w not in generic}
+
+
+def _names_subject_late(scene: dict, tokens: set) -> bool:
+    """True when the case is not named in the opening words.
+
+    A part opening "Between 1968 and 1970, a gunman killed at least five
+    people" has spent its first seconds without telling anyone whose story
+    this is. On Zodiac the alias first landed between 11 and 42 seconds in,
+    and in two parts never in the first scene at all."""
+    if not tokens:
+        return False
+    import re as _re
+    opening = _re.findall(r"[A-Za-z]+", (scene.get("text") or ""))[:NAME_BY_WORD]
+    return not any(w.lower() in tokens for w in opening)
+
+
+def _repair_openings(client, db, case_id: str, script: dict, tokens: set | None = None) -> int:
     """Give each part a cold open, by prepending rather than rewriting.
 
     The scene-repair loop cannot do this: it hands the model a scene's text
@@ -495,7 +537,10 @@ def _repair_openings(client, db, case_id: str, script: dict) -> int:
     the new opening words, so the rule that a scene's first anchor is where
     its text starts holds -- and the part's opening frame plays under the
     question, which is where it belongs."""
-    need = [p for p in script["parts"] if p["scenes"] and _missing_opening_hook(p["scenes"][0])]
+    tokens = tokens or set()
+    need = [p for p in script["parts"] if p["scenes"]
+            and (_missing_opening_hook(p["scenes"][0])
+                 or _names_subject_late(p["scenes"][0], tokens))]
     if not need:
         return 0
 
@@ -514,8 +559,11 @@ def _repair_openings(client, db, case_id: str, script: dict) -> int:
                    "three sentences that should come BEFORE the existing text: name what is "
                    "unresolved and ask it out loud, so a viewer scrolling past learns why the "
                    "next minutes are worth it. End on the question. Use only facts the script "
-                   "already establishes -- no tease, no claim the case does not support. Return "
-                   "the new sentences only, not the existing text.\n\n" + listing}],
+                   "already establishes -- no tease, no claim the case does not support. The "
+                   "killer's name, or the alias the public knows him by, MUST appear within the "
+                   "first six words: a viewer decides whether this is a case they care about "
+                   "before the second sentence, and cannot decide that about an unnamed gunman. "
+                   "Return the new sentences only, not the existing text.\n\n" + listing}],
         output_config={"format": {"type": "json_schema", "schema": OPENING_SCHEMA}},
     )
     db.log_usage(case_id, "script_openings", SCRIPT_MODEL,
@@ -529,6 +577,13 @@ def _repair_openings(client, db, case_id: str, script: dict) -> int:
     for part in need:
         opening = written.get(part["part_number"], "")
         if not opening or "?" not in opening:
+            continue
+        # Refuse a rewrite that solves the hook but not the name. Taking it
+        # anyway would clear the flag and ship a part that still opens on an
+        # unnamed gunman, which is the failure this pass exists to fix.
+        if tokens and _names_subject_late({"text": opening}, tokens):
+            print(f"    part {part['part_number']}: cold open does not name the case "
+                  f"in its first {NAME_BY_WORD} words -- not used", flush=True)
             continue
         scene = part["scenes"][0]
         scene["text"] = opening + " " + scene["text"].strip()
@@ -903,7 +958,7 @@ def run(case_id: str, db) -> None:
     # After splitting, so the cold open lands on whatever ends up being the
     # part's actual first scene, and before lengths are annotated so the added
     # words are counted.
-    _repair_openings(client, db, case_id, script)
+    _repair_openings(client, db, case_id, script, _subject_tokens(brief))
     stale = _drop_unverbatim_anchors(script)
     if stale:
         print(f'  {stale} scene(s) had anchors that are not verbatim in their text -- cleared')
