@@ -97,6 +97,43 @@ def _detect(image_path: str):
         ascii_tmp.unlink(missing_ok=True)
 
 
+_YOLO_MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "yolov8n.pt"
+# 0.60, measured: across 70 empty-mode frames from the Zodiac run, 69 score
+# exactly 0.00 and the only detection at all is a stack of paper at 0.54.
+# The threshold sits above that. This backstop caught nothing real on that
+# sample -- RealVisXL genuinely does not put people into object scenes the
+# way SD 1.5 did -- so it is insurance against a failure that has not
+# happened here, at about 0.2s a frame.
+_YOLO_PERSON_CONF = 0.60
+_YOLO = None
+
+
+def _get_yolo():
+    global _YOLO
+    if _YOLO is None:
+        from ultralytics import YOLO
+        _YOLO = YOLO(str(_YOLO_MODEL_PATH))
+    return _YOLO
+
+
+def _person_count(image_path: str) -> int:
+    """People in the frame, faces or not.
+
+    This is the check YuNet and NudeNet cannot make. A figure walking away
+    from camera has no face to find and, fully clothed, no body part NudeNet
+    scores -- so a frame of two men on a dune, one in a coat with his back
+    turned, passed both detectors as empty and shipped. YOLO finds them at
+    0.9 confidence.
+
+    Returns a large sentinel on failure so the caller fails safe, matching
+    _face_count."""
+    try:
+        result = _get_yolo()(image_path, verbose=False, classes=[0])[0]
+        return sum(1 for c in result.boxes.conf if float(c) >= _YOLO_PERSON_CONF)
+    except Exception:
+        return 99
+
+
 def _unsafe_reason(image_path: str, people_allowed: bool = False) -> str:
     """Why this frame is rejected, or "" if it is fine.
 
@@ -126,6 +163,14 @@ def _unsafe_reason(image_path: str, people_allowed: bool = False) -> str:
     if parts:
         top = max(parts, key=lambda d: d.get("score", 0))
         return f"body part: {top.get('class')} {top.get('score', 0):.2f}"
+    # Last and broadest: a whole person, with or without a face. Only in
+    # empty mode -- in figures mode people are the point of the shot, and the
+    # face veto above is what keeps them anonymous.
+    people = _person_count(image_path)
+    if people >= 99:
+        return "person detector could not read the file"
+    if people > 0:
+        return f"{people} person(s) detected (no face visible)"
     return ""
 
 
