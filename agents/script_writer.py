@@ -524,7 +524,8 @@ def _names_subject_late(scene: dict, tokens: set) -> bool:
     return not any(w.lower() in tokens for w in opening)
 
 
-def _repair_openings(client, db, case_id: str, script: dict, tokens: set | None = None) -> int:
+def _repair_openings(client, db, case_id: str, script: dict, tokens: set | None = None,
+                     retries: int = 1) -> int:
     """Give each part a cold open, by prepending rather than rewriting.
 
     The scene-repair loop cannot do this: it hands the model a scene's text
@@ -597,6 +598,16 @@ def _repair_openings(client, db, case_id: str, script: dict, tokens: set | None 
         fixed += 1
     if fixed:
         print(f"  cold open added to {fixed} part(s)", flush=True)
+
+    # Ask again for whatever was refused. A rejected rewrite leaves the part
+    # with no cold open at all, which is worse than the opening it was meant
+    # to replace -- and refusals are common enough to matter: the model
+    # answered part 5 without naming the case, the check declined it, and the
+    # part shipped hookless. One retry, so a bad round cannot loop.
+    if retries > 0 and any(_missing_opening_hook(p["scenes"][0])
+                           or _names_subject_late(p["scenes"][0], tokens)
+                           for p in script["parts"] if p["scenes"]):
+        fixed += _repair_openings(client, db, case_id, script, tokens, retries - 1)
     return fixed
 
 
