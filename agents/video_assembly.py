@@ -536,19 +536,20 @@ def _build_scene_segment(
     drawtext = ",".join(caption_filters)
 
     if title_overlay:
-        part_number, hook = title_overlay
-        title_caption_path = work_dir / f"{tag}_title.txt"
-        _write_caption_file(hook, title_caption_path, width=28)
+        part_number, _hook = title_overlay
+        # The hook used to be drawn here too, four boxed lines under the part
+        # badge. On the published part 2 that put three separate texts on
+        # screen at once -- badge, hook, subtitle -- over the faces on the
+        # composite, while TikTok printed the same hook again as the post's
+        # own caption directly below the frame. The hook is still written to
+        # metadata.json and still goes out with the video; it just no longer
+        # covers the picture twice over.
         enable = f"lt(t,{TITLE_OVERLAY_SECONDS})"
         drawtext += (
             f",drawtext=fontfile='{_filter_path(FONT_BOLD)}':text='PART {part_number}':"
             f"fontsize=80:fontcolor=white:borderw=4:bordercolor=black:"
             f"box=1:boxcolor=black@0.45:boxborderw=16:"
-            f"x=(w-text_w)/2:y=180:enable='{enable}',"
-            f"drawtext=fontfile='{_filter_path(FONT)}':textfile='{_filter_path(title_caption_path)}':"
-            f"fontsize=42:fontcolor=white:borderw=3:bordercolor=black:line_spacing=6:"
-            f"box=1:boxcolor=black@0.45:boxborderw=16:"
-            f"x=(w-text_w)/2:y=300:enable='{enable}'"
+            f"x=(w-text_w)/2:y=180:enable='{enable}'"
         )
 
     if visual_track:

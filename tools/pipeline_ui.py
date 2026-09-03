@@ -57,19 +57,48 @@ def _case_state(case_id: str) -> dict:
     videos = sorted((d / "video").glob("part*.mp4")) if (d / "video").exists() else []
     ai = list((d / "media" / "ai_generated").glob("*.png")) if (d / "media" / "ai_generated").exists() else []
     real = list((d / "media" / "accepted").glob("*")) if (d / "media" / "accepted").exists() else []
+    manual_dir = d / "media" / "manual"
+    manual = list(manual_dir.iterdir()) if manual_dir.exists() else []
+    review = list((d / "media" / "review").glob("*")) if (d / "media" / "review").exists() else []
+
+    def _count(name):
+        path = d / name
+        if not path.exists():
+            return 0
+        try:
+            return len(json.loads(path.read_text(encoding="utf-8")))
+        except Exception:
+            return 0
+
+    # Scenes the video stage will have to paper over with a text card.
+    unresolved = 0
+    manifest_path = d / "media_manifest.json"
+    if manifest_path.exists():
+        try:
+            items = json.loads(manifest_path.read_text(encoding="utf-8"))["items"]
+            unresolved = sum(1 for i in items if not i.get("local_paths"))
+        except Exception:
+            unresolved = 0
+
     return {
         "brief": (d / "brief.json").exists(),
         "script": (d / "script.json").exists(),
-        "media": (d / "media_manifest.json").exists(),
+        "media": manifest_path.exists(),
         "audio": (d / "audio").exists(),
         "videos": len(videos),
         "ai_frames": len(ai),
         "real_photos": len(real),
         "metadata": (d / "metadata.json").exists(),
+        "manual_files": len(manual),
+        "needed": _count("manual_needed.json"),
+        "review": len(review),
+        "unresolved": unresolved,
+        "publish_txt": (d / "publish.txt").exists(),
     }
 
 
-def _start(case_id: str, stage: str, topic: str, fast: bool, max_parts: str) -> str:
+def _start(case_id: str, stage: str, topic: str, fast: bool, max_parts: str,
+           people_only: bool = False, tool: str = "") -> str:
     if _running():
         return "A stage is already running."
     if not case_id:
@@ -82,10 +111,24 @@ def _start(case_id: str, stage: str, topic: str, fast: bool, max_parts: str) -> 
         env["PIPELINE_FAST_IMAGES"] = "1"
     if max_parts.strip().isdigit() and int(max_parts) > 0:
         env["PIPELINE_MAX_PARTS"] = max_parts.strip()
+    if people_only:
+        # Planning pass: resolve the named people and documents, report what
+        # has to be supplied by hand, generate nothing. Cheap, and safe to run
+        # against a finished case -- it writes no manifest and wipes nothing.
+        env["PIPELINE_PEOPLE_ONLY"] = "1"
 
-    cmd = [str(PYTHON), "-u", "run_pipeline.py", "--case-id", case_id, "--stage", stage]
-    if topic.strip():
-        cmd += ["--topic", topic.strip()]
+    if tool == "manual":
+        cmd = [str(PYTHON), "-u", "tools/add_manual_media.py", case_id]
+    elif tool == "approve":
+        cmd = [str(PYTHON), "-u", "tools/add_manual_media.py", case_id, "--approve-review"]
+    elif tool == "publish_txt":
+        cmd = [str(PYTHON), "-u", "tools/export_metadata.py", case_id]
+    else:
+        cmd = [str(PYTHON), "-u", "run_pipeline.py", "--case-id", case_id, "--stage", stage]
+        if topic.strip():
+            cmd += ["--topic", topic.strip()]
+    if tool:
+        stage = tool
 
     with _lock:
         _run["log"].clear()
@@ -216,6 +259,8 @@ class Handler(BaseHTTPRequestHandler):
             form.get("topic", [""])[0],
             form.get("fast", [""])[0] == "on",
             form.get("max_parts", [""])[0],
+            people_only=bool(form.get("plan")),
+            tool=form.get("tool", [""])[0],
         )
         if error:
             with _lock:
@@ -242,17 +287,32 @@ class Handler(BaseHTTPRequestHandler):
             st = _case_state(c)
             def mark(ok): return "yes" if ok else "&mdash;"
             topic = topics.get(c) or '<span style="color:#b3261e">not set</span>'
+            # Red where a number means work is waiting: photos still to
+            # supply, mugshots still to approve, scenes that will ship as a
+            # text card. Those were invisible here and only showed up in the
+            # finished video.
+            def warn(n, label):
+                if not n:
+                    return "&mdash;"
+                return f'<span style="color:#b3261e"><b>{n}</b> {label}</span>'
+
             rows += (
                 f"<tr><td><b>{html.escape(c)}</b></td>"
                 f"<td>{html.escape(topic) if topics.get(c) else topic}</td>"
                 f"<td>{mark(st['brief'])}</td><td>{mark(st['script'])}</td>"
                 f"<td>{st['real_photos']} real / {st['ai_frames']} ai</td>"
-                f"<td>{mark(st['audio'])}</td><td>{st['videos']}</td>"
-                f"<td>{mark(st['metadata'])}</td></tr>"
+                f"<td>{st['manual_files'] or '&mdash;'}</td>"
+                f"<td>{warn(st['needed'], 'to supply')}</td>"
+                f"<td>{warn(st['review'], 'to approve')}</td>"
+                f"<td>{warn(st['unresolved'], 'empty')}</td>"
+                f"<td>{st['videos']}</td>"
+                f"<td>{mark(st['metadata'])}</td>"
+                f"<td>{mark(st['publish_txt'])}</td></tr>"
             )
         table = (
             "<table><tr><th>case</th><th>topic</th><th>brief</th><th>script</th><th>frames</th>"
-            f"<th>audio</th><th>videos</th><th>meta</th></tr>{rows}</table>"
+            "<th>manual</th><th>needed</th><th>review</th><th>empty scenes</th>"
+            f"<th>videos</th><th>meta</th><th>publish.txt</th></tr>{rows}</table>"
             if rows else '<p class="muted">No cases yet — enter a new id and topic below.</p>'
         )
 
@@ -271,6 +331,21 @@ class Handler(BaseHTTPRequestHandler):
           style="background:#1f6feb">Run full pipeline</button>
   <a class="btn sec" href="/stop" style="text-decoration:none">Stop</a>
 </form>
+<form method="post" class="row" style="gap:10px;align-items:center;margin-top:12px">
+  <input name="case_id" list="cases" placeholder="case id" required style="width:150px">
+  <input type="hidden" name="stage" value="archive">
+  <button class="btn needs-idle" type="submit" name="plan" value="1"
+          style="background:#6f42c1">Plan: who &amp; what is missing</button>
+  <button class="btn sec needs-idle" type="submit" name="tool" value="manual">Fold in manual photos</button>
+  <button class="btn sec needs-idle" type="submit" name="tool" value="approve">Approve mugshots</button>
+  <button class="btn sec needs-idle" type="submit" name="tool" value="publish_txt">Build publish.txt</button>
+</form>
+<p class="muted" style="margin-bottom:0"><b>Plan</b> runs the archive stage in planning mode:
+it resolves the named people and documents, writes <code>manual_needed.json</code> listing each
+one with the filename that would answer it, and generates nothing. Drop those files into
+<code>data/cases/&lt;case&gt;/media/manual/</code> &mdash; named after the person
+(<code>David Faraday.jpg</code>) so they survive a script regeneration &mdash; then run
+<b>archive</b> normally.</p>
 <p class="muted" style="margin-bottom:0"><b>Run full pipeline</b> goes story &rarr; script &rarr;
 archive &rarr; voiceover &rarr; video &rarr; metadata &rarr; publish in one go, ignoring the
 stage dropdown. Publishing stays a dry run unless <code>PUBLISH_DRY_RUN=false</code> is set.
