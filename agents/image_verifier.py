@@ -76,6 +76,21 @@ photo, etc.), as opposed to something else entirely? Do not reject it for lookin
 "wrong" person, wrong angle, low quality, or otherwise being an unremarkable photo of *a* \
 person -- only reject if it clearly isn't a photo of a person at all.
 
+TWO EXCEPTIONS, because common names collide. A search for "Matt Turner", a 1991 murder \
+victim, returned the United States national team goalkeeper in a 2022 match kit; "Raymond \
+Smith" returned a US Navy officer's official portrait. Both are photographs of a person, both \
+passed this check, and both would have appeared in a documentary captioned as someone they are \
+not. So also answer matches=false when:
+- THE PHOTOGRAPH IS PLAINLY LATER THAN THE CASE. You are told the era. Only LATER disqualifies: \
+modern sports kit, a digital-era snapshot, current uniforms or insignia. EARLIER IS EXPECTED and \
+must never be rejected -- these people had childhoods, school photographs and army portraits \
+decades before the case, and a yearbook picture from twenty years earlier is exactly the kind of \
+photograph that survives. Judge only clear cases; an undated studio portrait is fine.
+- THE SUBJECT IS PLAINLY A DIFFERENT PUBLIC FIGURE. Someone photographed in the uniform of a \
+role the description does not mention -- an athlete in team kit, an officer in dress uniform \
+with service ribbons, a politician at a podium -- when the query names a private individual, \
+is a name collision, not the person.
+
 Answer with a JSON object only."""
 
 DOCUMENT_SYSTEM_PROMPT = """You check whether a scanned document, letter, cipher, poster or newspaper page actually shows what it is supposed to, before it is used in a true-crime documentary video.
@@ -325,7 +340,7 @@ def _relevance_put(key: str, matches: bool, reason: str) -> None:
 
 
 def verify_image(image_path: str, description: str, is_person: bool = False,
-                 is_document: bool = False):
+                 is_document: bool = False, era: str = ""):
     """Returns (matches: bool, reason: str, usage) -- usage is None on failure.
     Fails open (treats the image as a match) if the API call itself errors,
     so a transient API issue doesn't block the whole archive stage; it only
@@ -334,6 +349,8 @@ def verify_image(image_path: str, description: str, is_person: bool = False,
         return True, "verification skipped -- no API key", None
 
     mode = "document" if is_document else ("person" if is_person else "object")
+    if era and is_person:
+        mode += ":" + era   # era changes the verdict, so it belongs in the cache key
     cache_key = _relevance_key(image_path, description, mode)
     if cache_key:
         hit = _relevance_get(cache_key)
@@ -349,6 +366,9 @@ def verify_image(image_path: str, description: str, is_person: bool = False,
         system_prompt = PERSON_SYSTEM_PROMPT
         question = (f"Is this a photograph of a person (identity already confirmed "
                     f"by filename: {description})?")
+        if era:
+            question = (f"The case is from {era}. A photograph from BEFORE then is "
+                        f"expected and fine; only one clearly taken AFTER it is wrong. ") + question
     else:
         system_prompt = SYSTEM_PROMPT
         question = f"Does this image actually show: {description}"

@@ -554,13 +554,14 @@ def _extension_for(url: str) -> str:
     return match.group(1).lower() if match else "jpg"
 
 
-def _verify(path: Path, query: str, is_person: bool = False, is_document: bool = False):
+def _verify(path: Path, query: str, is_person: bool = False, is_document: bool = False,
+            era: str = ""):
     """Vision check that a downloaded candidate actually depicts the query
     subject -- catches keyword-coincidence false positives (a "crowbar"
     electronics diagram, a "Beetle" insect stamp) that text matching alone
     can't. Returns (matches, reason, usage)."""
     from agents.image_verifier import verify_image
-    return verify_image(str(path), query, is_person=is_person, is_document=is_document)
+    return verify_image(str(path), query, is_person=is_person, is_document=is_document, era=era)
 
 
 def _name_tokens(query: str) -> list[str]:
@@ -930,7 +931,7 @@ def _resolve_query(case_id, part_number, scene_index, q_index, query, known_peop
             if not _download(cand["url"], dest_path):
                 continue
             matches, _reason, usage = _verify(dest_path, query, is_person=is_person,
-                                              is_document=_is_document(query))
+                                              is_document=_is_document(query), era=era)
             if usage:
                 db.log_usage(case_id, "archive_verify", IMAGE_VERIFY_MODEL, usage.input_tokens, usage.output_tokens)
             if not matches:
