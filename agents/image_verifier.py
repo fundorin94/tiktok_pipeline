@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import mimetypes
+import re
 import time
 from pathlib import Path
 
@@ -132,19 +133,6 @@ Do NOT require a photograph here. The subject IS a document: a page of handwriti
 Reject it (matches=false) only when the document is the wrong one: a different case entirely, a modern reproduction or fan artwork rather than the historical item, an unrelated form, or a page whose subject has nothing to do with the description.
 
 Answer with a JSON object only."""
-
-SCHEMA = {
-    "type": "object",
-    "properties": {
-        "safe": {"type": "boolean"},
-        "period_ok": {"type": "boolean"},
-        "text_ok": {"type": "boolean"},
-        "reason": {"type": "string"},
-    },
-    "required": ["safe", "period_ok", "text_ok", "reason"],
-    "additionalProperties": False,
-}
-
 
 _HUMAN_CLAUSE_EMPTY = """- a human being or any part of one (face, body, torso, limbs, hands, silhouette, reflection), clothed or not, alive or dead, sharp or blurry, at any size;"""
 
@@ -295,6 +283,47 @@ def _ask_safety(client, data: str, media_type: str, question: str,
                 "reason": f"safety check failed: {exc}"}, None
 
 
+_RELEVANCE_CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "relevance_cache.json"
+_RELEVANCE_CACHE = None
+
+
+def _relevance_key(image_path: str, description: str, mode: str) -> str:
+    """Same bytes, same question, same answer -- so key on all three.
+
+    The planning pass and the archive stage search the same queries and
+    download the same candidates, and the archive stage wipes accepted/ on
+    every run, so without this the relevance check is paid for twice on a
+    case that was planned first, and again on every rerun. Downloads were
+    already cached (data/media_cache); this is the half that costs money."""
+    import hashlib
+    try:
+        digest = hashlib.sha1(Path(image_path).read_bytes()).hexdigest()
+    except OSError:
+        return ""
+    question = re.sub(r"\s+", " ", description.strip().lower())
+    return f"{mode}:{hashlib.sha1(question.encode('utf-8')).hexdigest()[:16]}:{digest}"
+
+
+def _relevance_get(key: str):
+    global _RELEVANCE_CACHE
+    if _RELEVANCE_CACHE is None:
+        try:
+            _RELEVANCE_CACHE = json.loads(_RELEVANCE_CACHE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            _RELEVANCE_CACHE = {}
+    return _RELEVANCE_CACHE.get(key)
+
+
+def _relevance_put(key: str, matches: bool, reason: str) -> None:
+    _relevance_get(key)  # ensure loaded
+    _RELEVANCE_CACHE[key] = {"matches": matches, "reason": reason}
+    try:
+        _RELEVANCE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _RELEVANCE_CACHE_PATH.write_text(json.dumps(_RELEVANCE_CACHE), encoding="utf-8")
+    except OSError:
+        pass  # a cache is an optimisation, never fail a run over it
+
+
 def verify_image(image_path: str, description: str, is_person: bool = False,
                  is_document: bool = False):
     """Returns (matches: bool, reason: str, usage) -- usage is None on failure.
@@ -303,6 +332,13 @@ def verify_image(image_path: str, description: str, is_person: bool = False,
     catches semantic mismatches when the check actually runs."""
     if not ANTHROPIC_API_KEY:
         return True, "verification skipped -- no API key", None
+
+    mode = "document" if is_document else ("person" if is_person else "object")
+    cache_key = _relevance_key(image_path, description, mode)
+    if cache_key:
+        hit = _relevance_get(cache_key)
+        if hit is not None:
+            return hit["matches"], hit["reason"], None
 
     path = Path(image_path)
 
@@ -338,6 +374,20 @@ def verify_image(image_path: str, description: str, is_person: bool = False,
         if not text_blocks:
             return True, "verification returned no content", response.usage
         result = json.loads(text_blocks[0])
-        return bool(result.get("matches", True)), result.get("reason", ""), response.usage
+        if "matches" not in result:
+            # Defaulting a missing verdict to True is how this check spent a
+            # week accepting everything: a duplicate SCHEMA assignment shadowed
+            # the relevance schema with the safety one, so every answer came
+            # back as safe/period_ok/text_ok, "matches" was never present, and
+            # the default said yes -- while the model's own reason field read
+            # "it does not depict a giraffe in any way".
+            return True, f"verifier returned no verdict ({sorted(result)}) -- accepted", response.usage
+        matches, reason = bool(result["matches"]), result.get("reason", "")
+        # Only a real verdict is cached. The fail-open paths below and above
+        # return "accepted without check", and storing that would make one
+        # transient outage permanently bless whatever it touched.
+        if cache_key:
+            _relevance_put(cache_key, matches, reason)
+        return matches, reason, response.usage
     except Exception as exc:
         return True, f"verification failed ({exc}) -- accepted without check", None
