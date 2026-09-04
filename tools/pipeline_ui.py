@@ -61,14 +61,35 @@ def _case_state(case_id: str) -> dict:
     manual = list(manual_dir.iterdir()) if manual_dir.exists() else []
     review = list((d / "media" / "review").glob("*")) if (d / "media" / "review").exists() else []
 
-    def _count(name):
-        path = d / name
+    def _still_needed():
+        """Entries from the planning pass that are STILL not covered.
+
+        Counting the file's rows was wrong: manual_needed.json is written
+        once, during the planning pass, and never changes when photos are
+        added. The panel went on reporting 32 outstanding while 23 files sat
+        in media/manual answering 29 of them -- so the one number that was
+        supposed to say "your pictures landed" said nothing had."""
+        path = d / "manual_needed.json"
         if not path.exists():
             return 0
         try:
-            return len(json.loads(path.read_text(encoding="utf-8")))
+            entries = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return 0
+        try:
+            import sys
+            sys.path.insert(0, str(ROOT))
+            from agents.archive_finder import _manual_frames
+        except Exception:
+            return len(entries)
+        remaining = 0
+        for e in entries:
+            tag = f"part{e['part_number']}_scene{e['scene_index']}_q{e['query_index']}"
+            if not _manual_frames(case_id, tag, e.get("person", "")):
+                remaining += 1
+        return remaining
+
+    opening = next((p for p in manual if p.stem.lower() == "opening"), None)
 
     # Scenes the video stage will have to paper over with a text card.
     unresolved = 0
@@ -90,7 +111,8 @@ def _case_state(case_id: str) -> dict:
         "real_photos": len(real),
         "metadata": (d / "metadata.json").exists(),
         "manual_files": len(manual),
-        "needed": _count("manual_needed.json"),
+        "needed": _still_needed(),
+        "opening": opening is not None,
         "review": len(review),
         "unresolved": unresolved,
         "publish_txt": (d / "publish.txt").exists(),
@@ -296,12 +318,18 @@ class Handler(BaseHTTPRequestHandler):
                     return "&mdash;"
                 return f'<span style="color:#b3261e"><b>{n}</b> {label}</span>'
 
+            # The opening frame is one specific file among the manual ones and
+            # decides what every part opens on, so it gets its own mark instead
+            # of disappearing into the count.
+            opening_mark = ' <span style="color:#16704a">+opening</span>' if st["opening"] else ""
+            manual_cell = f"{st['manual_files'] or '&mdash;'}{opening_mark}"
+
             rows += (
                 f"<tr><td><b>{html.escape(c)}</b></td>"
                 f"<td>{html.escape(topic) if topics.get(c) else topic}</td>"
                 f"<td>{mark(st['brief'])}</td><td>{mark(st['script'])}</td>"
                 f"<td>{st['real_photos']} real / {st['ai_frames']} ai</td>"
-                f"<td>{st['manual_files'] or '&mdash;'}</td>"
+                f"<td>{manual_cell}</td>"
                 f"<td>{warn(st['needed'], 'to supply')}</td>"
                 f"<td>{warn(st['review'], 'to approve')}</td>"
                 f"<td>{warn(st['unresolved'], 'empty')}</td>"
