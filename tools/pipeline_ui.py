@@ -152,33 +152,58 @@ def _start(case_id: str, stage: str, topic: str, fast: bool, max_parts: str,
     if tool:
         stage = tool
 
+    # The log also goes to disk. It used to live only in this process's
+    # memory, so when the panel died mid-run the entire record died with it --
+    # a twelve-hour archive stopped and there was nothing left to say why.
+    log_path = ROOT / "logs" / f"{case_id}_{stage}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
     with _lock:
         _run["log"].clear()
         _run["case"], _run["stage"], _run["started"] = case_id, stage, time.time()
+        _run["log_path"] = log_path
         _run["proc"] = subprocess.Popen(
             cmd, cwd=str(ROOT), env=env, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
         )
-    threading.Thread(target=_pump, args=(_run["proc"],), daemon=True).start()
+    threading.Thread(target=_pump, args=(_run["proc"], log_path), daemon=True).start()
     return ""
 
 
-def _pump(proc) -> None:
+def _pump(proc, log_path=None) -> None:
     """Collect output lines. Progress bars from diffusers repeat the same
-    line hundreds of times, so those are collapsed instead of flooding."""
-    for line in proc.stdout:
-        line = line.rstrip()
-        if not line:
-            continue
-        if "it/s" in line or "%|" in line:
+    line hundreds of times, so those are collapsed instead of flooding.
+
+    Everything except the progress bars is also appended to log_path, so a
+    run leaves a record that outlives this process."""
+    sink = None
+    if log_path is not None:
+        try:
+            sink = open(log_path, "w", encoding="utf-8", errors="replace")
+        except OSError:
+            sink = None
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            if "it/s" in line or "%|" in line:
+                with _lock:
+                    if _run["log"] and _run["log"][-1].startswith("  ...generating"):
+                        _run["log"][-1] = "  ...generating (progress)"
+                    else:
+                        _run["log"].append("  ...generating (progress)")
+                continue
             with _lock:
-                if _run["log"] and _run["log"][-1].startswith("  ...generating"):
-                    _run["log"][-1] = "  ...generating (progress)"
-                else:
-                    _run["log"].append("  ...generating (progress)")
-            continue
-        with _lock:
-            _run["log"].append(line)
+                _run["log"].append(line)
+            if sink:
+                sink.write(line + "\n")
+                sink.flush()  # flushed per line: a crash must not lose the tail
+    finally:
+        if sink:
+            code = proc.poll()
+            sink.write(f"\n-- process exited with code {code} --\n")
+            sink.close()
 
 
 def _topics() -> dict:
@@ -228,13 +253,26 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8">
 {body}
 <script>
 setInterval(async () => {{
-  const r = await fetch('/status');
-  const s = await r.json();
-  document.getElementById('log').textContent = s.log;
-  document.getElementById('state').innerHTML = s.state;
-  document.querySelectorAll('.needs-idle').forEach(b => b.disabled = s.running);
-  if (!s.running && window._wasRunning) location.reload();
-  window._wasRunning = s.running;
+  // Without the catch, a dead panel looked exactly like a running job: the
+  // fetch threw, the page stopped updating, and the last frame it had drawn
+  // sat there saying "running: archive -- 111 min" for twelve hours.
+  try {{
+    const r = await fetch('/status');
+    const s = await r.json();
+    document.getElementById('log').textContent = s.log;
+    document.getElementById('state').innerHTML = s.state;
+    document.querySelectorAll('.needs-idle').forEach(b => b.disabled = s.running);
+    if (!s.running && window._wasRunning) location.reload();
+    window._wasRunning = s.running;
+    window._lostAt = null;
+  }} catch (e) {{
+    if (!window._lostAt) window._lostAt = Date.now();
+    const secs = Math.round((Date.now() - window._lostAt) / 1000);
+    document.getElementById('state').innerHTML =
+      '<span style="color:#b3261e;font-weight:600">panel not responding for ' + secs +
+      's &mdash; this page is a snapshot, not live. The run may have stopped too; ' +
+      'check logs/ for the record.</span>';
+  }}
 }}, 1500);
 </script>
 </body></html>"""

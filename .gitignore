@@ -20,3 +20,4 @@ __pycache__/
 *.pyc
 docs/site/
 data/relevance_cache.json
+logs/
