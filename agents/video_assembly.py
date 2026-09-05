@@ -179,11 +179,29 @@ def _index_media(manifest: dict) -> dict:
     return {(i["part_number"], i["scene_index"]): i for i in manifest["items"]}
 
 
+_EXT_FOR_FORMAT = {"JPEG": ".jpg", "PNG": ".png", "GIF": ".gif", "WEBP": ".webp",
+                   "BMP": ".bmp", "TIFF": ".tif"}
+
+
 def _stage_input(src_path: str, work_dir: Path, tag: str) -> str:
     """Copy a source file (which may live under a non-ASCII path) into the
-    ASCII work dir so ffmpeg can read it, and return the ASCII path."""
+    ASCII work dir so ffmpeg can read it, and return the ASCII path.
+
+    The extension comes from what the file actually IS, not what it is
+    called. ffmpeg picks its demuxer by extension, and a hand-supplied
+    "Edward Smith.jpg" that was really a GIF made it reach for the image2
+    demuxer, reject -loop, and take a whole seven-frame scene down to a text
+    placeholder. Downloaded pictures get renamed all the time, so the name
+    is not evidence."""
     src = Path(src_path)
-    dest = work_dir / f"{tag}{src.suffix}"
+    suffix = src.suffix
+    try:
+        from PIL import Image
+        with Image.open(src) as probe:
+            suffix = _EXT_FOR_FORMAT.get(probe.format, suffix)
+    except Exception:
+        pass  # unreadable by PIL: keep the name's suffix and let ffmpeg try
+    dest = work_dir / f"{tag}{suffix}"
     shutil.copy2(src, dest)
     return str(dest)
 
