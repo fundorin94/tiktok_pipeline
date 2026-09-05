@@ -195,12 +195,29 @@ def _stage_input(src_path: str, work_dir: Path, tag: str) -> str:
     is not evidence."""
     src = Path(src_path)
     suffix = src.suffix
+    fmt = None
     try:
         from PIL import Image
         with Image.open(src) as probe:
-            suffix = _EXT_FOR_FORMAT.get(probe.format, suffix)
+            fmt = probe.format
+            suffix = _EXT_FOR_FORMAT.get(fmt, suffix)
     except Exception:
         pass  # unreadable by PIL: keep the name's suffix and let ffmpeg try
+
+    # GIF is re-encoded, not just renamed. ffmpeg's gif demuxer has no -loop
+    # option at all, so naming the file correctly only moved the same error
+    # from a .jpg to a .gif -- these are still frames to us either way, and
+    # the first frame as a PNG is what the rest of the pipeline expects.
+    if fmt == "GIF":
+        try:
+            from PIL import Image
+            dest = work_dir / f"{tag}.png"
+            with Image.open(src) as im:
+                im.convert("RGB").save(dest, format="PNG")
+            return str(dest)
+        except Exception:
+            pass  # fall through to a plain copy rather than lose the frame
+
     dest = work_dir / f"{tag}{suffix}"
     shutil.copy2(src, dest)
     return str(dest)
